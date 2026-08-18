@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/public_check.py --history

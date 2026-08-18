@@ -1,0 +1,19 @@
+# Exact files
+.gitignore
+.public-allowlist
+.skillshare/.gitignore
+.skillshare/config.yaml
+PUBLICATION_POLICY.md
+SKILL.md
+README.md
+CHANGELOG.md
+LICENSE
+
+# Public directories
+.githooks/
+.skillshare/skills/popmart-blindbox-strategist/
+assets/
+examples/
+references/
+scripts/
+tests/

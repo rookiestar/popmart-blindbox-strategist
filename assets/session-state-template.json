@@ -1,0 +1,30 @@
+{
+  "series": "",
+  "model": {
+    "type": "unique_regular",
+    "designs": [],
+    "hint_labels": []
+  },
+  "boxes": [],
+  "preferences": {
+    "liked": [],
+    "disliked": [],
+    "strategy": "稳妥避雷",
+    "scores": {},
+    "score_default": 0,
+    "hard_avoid": [],
+    "hard_avoid_max_pp": null,
+    "stop_rules": {},
+    "tie_tolerance_pp": 0.5
+  },
+  "tools": {
+    "hint_cards": 0,
+    "display_cards": 0
+  },
+  "market_values": {},
+  "meta": {
+    "branch": "actual",
+    "updated_at": null,
+    "notes": []
+  }
+}

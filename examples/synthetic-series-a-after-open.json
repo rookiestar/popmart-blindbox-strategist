@@ -1,0 +1,176 @@
+{
+  "series": "合成系列 A",
+  "meta": {
+    "provenance": "synthetic",
+    "notes": [
+      "为公开回归测试构造，不对应真实用户或抽盒记录。"
+    ]
+  },
+  "model": {
+    "type": "unique_regular",
+    "designs": [
+      "设计A",
+      "设计B",
+      "设计C",
+      "设计D",
+      "设计E",
+      "设计F",
+      "设计G",
+      "设计H",
+      "设计I",
+      "设计J",
+      "设计K",
+      "设计L"
+    ],
+    "hint_labels": [
+      "设计A",
+      "设计B",
+      "设计C",
+      "设计D",
+      "设计E",
+      "设计F",
+      "设计G",
+      "设计H",
+      "设计I",
+      "设计J",
+      "设计K",
+      "设计L"
+    ]
+  },
+  "boxes": [
+    {
+      "id": "1",
+      "excluded": [
+        "设计A",
+        "设计B",
+        "设计C"
+      ],
+      "status": "available",
+      "tool_used": false
+    },
+    {
+      "id": "2",
+      "excluded": [
+        "设计D",
+        "设计E",
+        "设计F"
+      ],
+      "known": "设计H",
+      "status": "opened",
+      "tool_used": false
+    },
+    {
+      "id": "3",
+      "excluded": [],
+      "status": "sold_unknown",
+      "tool_used": false
+    },
+    {
+      "id": "4",
+      "excluded": [
+        "设计B",
+        "设计G",
+        "设计H"
+      ],
+      "status": "available",
+      "tool_used": false
+    },
+    {
+      "id": "5",
+      "excluded": [
+        "设计B",
+        "设计A",
+        "设计H"
+      ],
+      "status": "available",
+      "tool_used": false
+    },
+    {
+      "id": "6",
+      "excluded": [
+        "设计A",
+        "设计F",
+        "设计I"
+      ],
+      "status": "sold_unknown",
+      "tool_used": false
+    },
+    {
+      "id": "7",
+      "excluded": [],
+      "status": "sold_unknown",
+      "tool_used": false
+    },
+    {
+      "id": "8",
+      "excluded": [
+        "设计F",
+        "设计I",
+        "设计A",
+        "设计C"
+      ],
+      "status": "available",
+      "tool_used": true
+    },
+    {
+      "id": "9",
+      "excluded": [
+        "设计B",
+        "设计C",
+        "设计H"
+      ],
+      "status": "available",
+      "tool_used": false
+    },
+    {
+      "id": "10",
+      "excluded": [
+        "设计J",
+        "设计B",
+        "设计C"
+      ],
+      "status": "available",
+      "tool_used": false
+    },
+    {
+      "id": "11",
+      "excluded": [
+        "设计H",
+        "设计C",
+        "设计A"
+      ],
+      "status": "available",
+      "tool_used": false
+    },
+    {
+      "id": "12",
+      "excluded": [
+        "设计E",
+        "设计A",
+        "设计I"
+      ],
+      "status": "available",
+      "tool_used": false
+    }
+  ],
+  "preferences": {
+    "liked": [
+      "设计J",
+      "设计G",
+      "设计K",
+      "设计B"
+    ],
+    "disliked": [
+      "设计L",
+      "设计F",
+      "设计E",
+      "设计C"
+    ],
+    "strategy": "随便中个喜欢",
+    "tie_tolerance_pp": 0.5
+  },
+  "tools": {
+    "hint_cards": 1,
+    "display_cards": 0
+  }
+}

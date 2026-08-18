@@ -1,0 +1,27 @@
+.DS_Store
+.agents/
+.skillshare/skills/.metadata.json
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Machine-local and private working material
+.private/
+.local/
+local-data/
+sessions/
+screenshots/
+.env
+.env.*
+*.local.*
+*.log
+*.csv
+*.db
+*.sqlite
+*.sqlite3
+*.pem

@@ -1,0 +1,25 @@
+{
+  "series": "最小可运行示例",
+  "meta": {
+    "provenance": "synthetic",
+    "notes": ["为公开回归测试构造，不对应真实用户或抽盒记录。"]
+  },
+  "model": {
+    "type": "unique_regular",
+    "designs": ["A", "B", "C"],
+    "hint_labels": ["A", "B", "C"]
+  },
+  "boxes": [
+    {"id": "1", "excluded": ["C"], "status": "available", "tool_used": false},
+    {"id": "2", "excluded": ["A"], "status": "available", "tool_used": false},
+    {"id": "3", "excluded": [], "status": "sold_unknown", "tool_used": false}
+  ],
+  "preferences": {
+    "liked": ["A"],
+    "disliked": ["C"],
+    "strategy": "稳妥避雷",
+    "tie_tolerance_pp": 0.1
+  },
+  "tools": {"hint_cards": 1, "display_cards": 1},
+  "market_values": {"A": 100, "B": 60, "C": 30}
+}

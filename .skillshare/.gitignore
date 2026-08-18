@@ -1,0 +1,11 @@
+# BEGIN SKILLSHARE MANAGED - DO NOT EDIT
+logs/
+trash/
+backups/
+skills/popmart-blindbox-strategist/
+# END SKILLSHARE MANAGED
+
+# Public repository: keep the root Skill as the source of truth while exposing
+# a lightweight Skillshare-compatible source directory.
+!skills/popmart-blindbox-strategist/
+!skills/popmart-blindbox-strategist/**

@@ -1,0 +1,12 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/runkids/skillshare/main/schemas/project-config.schema.json
+targets:
+  - codex
+skills:
+  - name: popmart-blindbox-strategist
+    source: .skillshare/skills/popmart-blindbox-strategist
+ignore:
+  - .DS_Store
+  - .git/
+  - __pycache__/
+audit:
+  block_threshold: CRITICAL
