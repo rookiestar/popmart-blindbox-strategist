@@ -185,4 +185,4 @@ git config core.hooksPath .githooks
 
 ## English summary
 
-An API-key-free ChatGPT/Codex skill for POP MART online blind-box decisions. Core screenshot parsing and exact tray-level probability calculations use only Python's standard library. Live mainland-market research degrades gracefully when native search or a logged-in browser is unavailable. Tavily is not required.
+A skill for POP MART online blind-box decisions. Core screenshot parsing and exact tray-level probability calculations use only Python's standard library. Live mainland-market research degrades gracefully when native search or a logged-in browser is unavailable.
