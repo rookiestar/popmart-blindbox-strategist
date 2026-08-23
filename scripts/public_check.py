@@ -19,7 +19,7 @@ ALLOWLIST_PATH = ROOT / ".public-allowlist"
 ZERO_OBJECT_ID = "0" * 40
 MAX_TEXT_BYTES = 1_000_000
 
-ALLOWED_SUFFIXES = {".json", ".md", ".py", ".yaml"}
+ALLOWED_SUFFIXES = {".json", ".md", ".py", ".yaml", ".yml"}
 ALLOWED_EXTENSIONLESS = {
     ".gitignore",
     ".public-allowlist",
