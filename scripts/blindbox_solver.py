@@ -435,8 +435,26 @@ def _normalize_state(raw: Mapping[str, Any]) -> Dict[str, Any]:
     preferences["stop_rules"] = stop_rules
 
     preferences["tie_tolerance_pp"] = float(preferences.get("tie_tolerance_pp", 0.5))
-    if preferences["tie_tolerance_pp"] < 0:
+    if (
+        not math.isfinite(preferences["tie_tolerance_pp"])
+        or preferences["tie_tolerance_pp"] < 0
+    ):
         raise StateError("tie_tolerance_pp must be non-negative")
+    min_tool_uplift_supplied = "min_tool_uplift_pp" in preferences
+    preferences["min_tool_uplift_pp"] = float(
+        preferences.get(
+            "min_tool_uplift_pp",
+            preferences["tie_tolerance_pp"],
+        )
+    )
+    if (
+        not math.isfinite(preferences["min_tool_uplift_pp"])
+        or preferences["min_tool_uplift_pp"] < 0
+    ):
+        raise StateError("min_tool_uplift_pp must be non-negative")
+    preferences["min_tool_uplift_source"] = (
+        "explicit" if min_tool_uplift_supplied else "tie_tolerance_pp"
+    )
 
     tools = state.setdefault("tools", {})
     tools["hint_cards"] = int(tools.get("hint_cards", 0))
@@ -998,6 +1016,67 @@ def _action_metric_comparison_key(
     )
 
 
+def _primary_tool_metric(
+    metrics: Mapping[str, Any], state: Mapping[str, Any]
+) -> Tuple[float, str]:
+    """Return a higher-is-better primary utility normalized to a 0–1 span."""
+    prefs = state["preferences"]
+    mode = prefs["objective_mode"]
+    if mode == "risk_first":
+        scale = max(len(prefs["disliked"]), 1)
+        return (
+            -float(metrics["disliked_weighted_loss"]) / scale,
+            "severity_weighted_dislike_reduction",
+        )
+    if mode == "target_only":
+        return float(metrics["p_like_any"]), "p_like_any"
+    if mode == "top_target_first":
+        top = prefs["liked"][0] if prefs["liked"] else None
+        return (
+            float(metrics["liked_probabilities"].get(top, 0.0)),
+            "p_top_liked",
+        )
+    if mode in {"guardrail", "balanced"}:
+        expected_score = metrics.get("expected_score")
+        if expected_score is not None:
+            return (float(expected_score) + 10.0) / 20.0, "expected_score_range"
+        scale = max(len(prefs["liked"]), len(prefs["disliked"]), 1)
+        utility = float(metrics["liked_weighted_score"]) - float(
+            metrics["disliked_weighted_loss"]
+        )
+        return utility / (2.0 * scale) + 0.5, "legacy_utility_range"
+    if mode == "resale_ev":
+        values = [float(value) for value in (state.get("market_values") or {}).values()]
+        span = max(values) - min(values) if values else 0.0
+        if span <= 0:
+            return 0.0, "resale_value_range"
+        return (
+            (float(metrics["resale_ev"]) - min(values)) / span,
+            "resale_value_range",
+        )
+    raise StateError(f"unsupported objective mode: {mode}")
+
+
+def _primary_tool_uplift_pp(
+    current: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+    state: Mapping[str, Any],
+) -> Tuple[float, str]:
+    current_value, metric_name = _primary_tool_metric(current, state)
+    baseline_value, _ = _primary_tool_metric(baseline, state)
+    return 100.0 * (current_value - baseline_value), metric_name
+
+
+def _primary_terminal_values_equivalent(
+    a: Mapping[str, Any],
+    b: Mapping[str, Any],
+    state: Mapping[str, Any],
+) -> bool:
+    delta_pp, _ = _primary_tool_uplift_pp(a, b, state)
+    tolerance = float(state["preferences"]["tie_tolerance_pp"])
+    return abs(delta_pp) <= tolerance + 1e-12
+
+
 def _sort_metrics(metrics: List[Dict[str, Any]], state: Mapping[str, Any]) -> List[Dict[str, Any]]:
     return sorted(
         metrics,
@@ -1137,6 +1216,11 @@ def _action_summary(action: Mapping[str, Any]) -> Dict[str, Any]:
         "action": action["action"],
         "box_id": action["box_id"],
         "expected_draw_probability": action["expected_draw_probability"],
+        "expected_tools_used": action.get("expected_tools_used", 0.0),
+        "primary_uplift_pp": action.get("primary_uplift_pp", 0.0),
+        "primary_metric": action.get("primary_metric"),
+        "passes_tool_uplift_gate": action.get("passes_tool_uplift_gate", True),
+        "tool_gate_reason": action.get("tool_gate_reason"),
         "uplift_vs_no_card": action.get("uplift_vs_no_card"),
     }
 
@@ -1218,6 +1302,7 @@ def plan_tools(
             "branches": [],
             "draw_decision": baseline_decision,
             "depth_evaluated": depth,
+            "expected_tools_used": 0.0,
         }
     ]
 
@@ -1233,7 +1318,7 @@ def plan_tools(
         outcome: str,
         expected: MutableMapping[str, Any],
         expand_continuation: bool,
-    ) -> Tuple[Dict[str, Any], float]:
+    ) -> Tuple[Dict[str, Any], float, float]:
         next_norm, next_post = analyze_cached(next_state)
         best = _terminal_best(next_norm, next_post)
         draw_decision = evaluate_draw_decision(next_norm, best)
@@ -1251,8 +1336,8 @@ def plan_tools(
         if depth == 1 or not expand_continuation:
             if draw_decision["should_draw"]:
                 _accumulate_metrics(expected, best, p_outcome)
-                return branch, p_outcome
-            return branch, 0.0
+                return branch, p_outcome, 0.0
+            return branch, 0.0, 0.0
 
         continuation = plan_tools(
             next_norm,
@@ -1279,6 +1364,7 @@ def plan_tools(
         return (
             branch,
             p_outcome * next_action["expected_draw_probability"],
+            p_outcome * float(next_action["expected_tools_used"]),
         )
 
     if state["tools"]["hint_cards"] > 0:
@@ -1316,6 +1402,7 @@ def plan_tools(
             }
             expected = _expected_metric_template(state)
             draw_probability = 0.0
+            expected_additional_tools = 0.0
             branches: List[Dict[str, Any]] = []
             for excluded_label, p_outcome in sorted(
                 outcome_prob.items(), key=lambda kv: (-kv[1], kv[0])
@@ -1330,7 +1417,11 @@ def plan_tools(
                     0, int(next_state["tools"].get("hint_cards", 0)) - 1
                 )
                 try:
-                    branch, branch_draw_probability = evaluate_branch(
+                    (
+                        branch,
+                        branch_draw_probability,
+                        branch_additional_tools,
+                    ) = evaluate_branch(
                         next_state,
                         p_outcome,
                         f"not {excluded_label}",
@@ -1341,6 +1432,7 @@ def plan_tools(
                     continue
                 branches.append(branch)
                 draw_probability += branch_draw_probability
+                expected_additional_tools += branch_additional_tools
             actions.append(
                 {
                     "tool": "hint",
@@ -1354,6 +1446,7 @@ def plan_tools(
                         if beam is None or ("hint", box_id) in beam
                         else 1
                     ),
+                    "expected_tools_used": 1.0 + expected_additional_tools,
                 }
             )
 
@@ -1362,6 +1455,7 @@ def plan_tools(
             box_id = box["id"]
             expected = _expected_metric_template(state)
             draw_probability = 0.0
+            expected_additional_tools = 0.0
             branches: List[Dict[str, Any]] = []
             for actual, p_outcome in sorted(
                 posterior.marginals[box_id].items(), key=lambda kv: (-kv[1], kv[0])
@@ -1376,7 +1470,11 @@ def plan_tools(
                     0, int(next_state["tools"].get("display_cards", 0)) - 1
                 )
                 next_state["tools"]["reveal_cards"] = next_state["tools"]["display_cards"]
-                branch, branch_draw_probability = evaluate_branch(
+                (
+                    branch,
+                    branch_draw_probability,
+                    branch_additional_tools,
+                ) = evaluate_branch(
                     next_state,
                     p_outcome,
                     actual,
@@ -1385,6 +1483,7 @@ def plan_tools(
                 )
                 branches.append(branch)
                 draw_probability += branch_draw_probability
+                expected_additional_tools += branch_additional_tools
             actions.append(
                 {
                     "tool": "display",
@@ -1398,20 +1497,11 @@ def plan_tools(
                         if beam is None or ("display", box_id) in beam
                         else 1
                     ),
+                    "expected_tools_used": 1.0 + expected_additional_tools,
                 }
             )
 
     tool_order = {"none": 0, "display": 1, "hint": 2}
-    actions = sorted(
-        actions,
-        key=lambda action: (
-            _action_metric_comparison_key(
-                action["expected_terminal_metrics"], state
-            ),
-            tool_order[action["tool"]],
-            _stable_box_sort_key(action["box_id"]),
-        ),
-    )
     for action in actions:
         uplift = _metric_delta(
             action["expected_terminal_metrics"],
@@ -1419,6 +1509,48 @@ def plan_tools(
         )
         action["uplift_vs_no_card"] = uplift
         action["uplift_vs_direct_draw"] = uplift
+        primary_uplift_pp, primary_metric = _primary_tool_uplift_pp(
+            action["expected_terminal_metrics"],
+            baseline_policy_metrics,
+            state,
+        )
+        action["primary_uplift_pp"] = primary_uplift_pp
+        action["primary_metric"] = primary_metric
+        if action["tool"] == "none":
+            action["passes_tool_uplift_gate"] = True
+            action["tool_gate_reason"] = "no_card_baseline"
+        elif baseline_decision["should_draw"]:
+            threshold = state["preferences"]["min_tool_uplift_pp"]
+            action["passes_tool_uplift_gate"] = (
+                primary_uplift_pp + 1e-12 >= threshold
+            )
+            action["tool_gate_reason"] = (
+                "practical_uplift_met"
+                if action["passes_tool_uplift_gate"]
+                else "below_min_tool_uplift"
+            )
+        else:
+            action["passes_tool_uplift_gate"] = (
+                float(action["expected_draw_probability"]) > 0.0
+            )
+            action["tool_gate_reason"] = (
+                "rescue_route"
+                if action["passes_tool_uplift_gate"]
+                else "no_qualifying_branch"
+            )
+
+    actions = sorted(
+        actions,
+        key=lambda action: (
+            0 if action["passes_tool_uplift_gate"] else 1,
+            _action_metric_comparison_key(
+                action["expected_terminal_metrics"], state
+            ),
+            round(float(action["expected_tools_used"]), 12),
+            tool_order[action["tool"]],
+            _stable_box_sort_key(action["box_id"]),
+        ),
+    )
 
     result = {
         "planning_depth": depth,
@@ -1427,6 +1559,7 @@ def plan_tools(
         "baseline_policy_metrics": baseline_policy_metrics,
         "recommended_action": actions[0],
         "action_ranking": actions,
+        "min_tool_uplift_pp": state["preferences"]["min_tool_uplift_pp"],
         "planning_note": (
             "Direct draw or stop competes at every layer. Use only the first "
             "recommended action, then apply the real outcome and rerun."
@@ -1451,22 +1584,15 @@ def plan_tools(
                     "untruncated exact pass."
                 )
         depth_one_action = depth_one["recommended_action"]
-        matching_depth_two_action = next(
-            (
-                action
-                for action in actions
-                if (
-                    action["tool"],
-                    action["action"],
-                    action["box_id"],
-                )
-                == (
-                    depth_one_action["tool"],
-                    depth_one_action["action"],
-                    depth_one_action["box_id"],
-                )
-            ),
-            None,
+        selected_identity = (
+            result["recommended_action"]["tool"],
+            result["recommended_action"]["action"],
+            result["recommended_action"]["box_id"],
+        )
+        depth_one_identity = (
+            depth_one_action["tool"],
+            depth_one_action["action"],
+            depth_one_action["box_id"],
         )
         result["depth_1_recommended_action"] = _action_summary(depth_one_action)
         result["gain_vs_one_card_horizon"] = _metric_delta(
@@ -1474,13 +1600,12 @@ def plan_tools(
             depth_one_action["expected_terminal_metrics"],
         )
         result["first_action_changed_vs_depth_1"] = (
-            matching_depth_two_action is None
-            or _action_metric_comparison_key(
-                matching_depth_two_action["expected_terminal_metrics"],
-                state,
-            )
-            != _action_metric_comparison_key(
+            selected_identity != depth_one_identity
+        )
+        result["terminal_value_practically_equivalent_to_depth_1"] = (
+            _primary_terminal_values_equivalent(
                 result["recommended_action"]["expected_terminal_metrics"],
+                depth_one_action["expected_terminal_metrics"],
                 state,
             )
         )
@@ -1761,6 +1886,10 @@ def build_report(
             "score_tiers": state["preferences"]["score_tiers"],
             "sources": state["preferences"]["preference_sources"],
         },
+        "tool_policy": {
+            "min_tool_uplift_pp": state["preferences"]["min_tool_uplift_pp"],
+            "source": state["preferences"]["min_tool_uplift_source"],
+        },
         "model_summary": model_summary,
         "ranking": all_box_rows,
         "top_3": [row["box_id"] for row in all_box_rows[:3]],
@@ -1786,6 +1915,7 @@ def build_report(
                     "strategy_name",
                     "strategy_rule",
                     "preference_summary",
+                    "tool_policy",
                     "model_summary",
                     "tray_screening",
                 )

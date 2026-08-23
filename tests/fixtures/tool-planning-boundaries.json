@@ -1,0 +1,78 @@
+{
+  "meta": {
+    "provenance": "synthetic"
+  },
+  "base_example": "synthetic-series-b-after-open.json",
+  "direct_ready_cases": [
+    {
+      "name": "tiny-uplift-worse-risk",
+      "liked": ["设计A", "设计C", "设计E", "设计H", "设计J", "设计K", "设计L"],
+      "hard_avoid": "设计B",
+      "target_box_id": "3",
+      "disable_tool_boxes": ["2", "4", "8", "10"],
+      "expected_primary_uplift_pp": 0.06307480501331897,
+      "expected_recommended_tool": "none",
+      "expected_hard_avoid_delta": "positive",
+      "expected_score_delta": "negative"
+    },
+    {
+      "name": "sub-threshold-uplift-worse-risk",
+      "liked": ["设计A", "设计B", "设计F", "设计G", "设计H", "设计J"],
+      "hard_avoid": "设计K",
+      "target_box_id": "3",
+      "disable_tool_boxes": [],
+      "expected_primary_uplift_pp": 0.39600693331900416,
+      "expected_recommended_tool": "none",
+      "expected_hard_avoid_delta": "positive",
+      "expected_score_delta": "negative"
+    },
+    {
+      "name": "above-threshold-uplift-lower-risk",
+      "liked": ["设计B", "设计E", "设计F", "设计I", "设计J", "设计K"],
+      "hard_avoid": "设计A",
+      "target_box_id": "9",
+      "disable_tool_boxes": ["11"],
+      "expected_primary_uplift_pp": 0.5887713927206217,
+      "expected_recommended_tool": "hint",
+      "expected_hard_avoid_delta": "negative",
+      "expected_score_delta": "positive"
+    }
+  ],
+  "redundant_first_state": {
+    "series": "synthetic-redundant-first",
+    "model": {
+      "type": "unique_regular",
+      "designs": ["A", "B", "C"],
+      "hint_labels": ["A", "B", "C"]
+    },
+    "boxes": [
+      {
+        "id": "1",
+        "excluded": [],
+        "status": "available"
+      },
+      {
+        "id": "2",
+        "excluded": ["C"],
+        "status": "available"
+      },
+      {
+        "id": "3",
+        "excluded": ["A"],
+        "status": "available"
+      }
+    ],
+    "preferences": {
+      "liked": ["A"],
+      "disliked": [],
+      "strategy": "随便中个喜欢",
+      "tie_tolerance_pp": 0.5
+    },
+    "tools": {
+      "hint_cards": 2
+    },
+    "meta": {
+      "provenance": "synthetic"
+    }
+  }
+}

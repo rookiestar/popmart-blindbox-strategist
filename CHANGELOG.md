@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added `min_tool_uplift_pp`, defaulting to `tie_tolerance_pp`, so a
+  direct-ready tray does not spend cards on immaterial primary uplift.
+- Preserved rescue cards when direct draw fails but a card can create a
+  fully qualifying branch.
+- Added expected card consumption and separate depth-two action-identity and
+  terminal-equivalence fields; equivalent policies now prefer fewer cards.
+- Added report-level synthetic regressions around 0.063pp, 0.396pp, and
+  0.589pp uplift, plus a redundant-first-card regression.
 - Added a backward-compatible multi-tray session envelope with stable tray
   IDs, global tool/draw counters, and an append-only actual-event ledger.
 - Added one report-level session output that preserves independent posterior

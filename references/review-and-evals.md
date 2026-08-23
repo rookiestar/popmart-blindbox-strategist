@@ -217,8 +217,9 @@ recommendation when no cards are available.
 ### E16 — Optional two-step planning
 
 Depth two keeps direct draw or stop at both layers, never targets a used box,
-returns only the first executable action, reports whether depth one's first
-action remains optimal, and labels terminal gain as two-card versus one-card
+returns only the first executable action, reports action identity separately
+from terminal equivalence, prefers fewer expected cards for equivalent
+terminal policies, and labels terminal gain as two-card versus one-card
 horizon rather than as proof against rolling one-step replanning.
 
 ### E17 — Favorite stop line
@@ -235,6 +236,13 @@ never raw exclusion count. It distinguishes direct-ready, tool-dependent,
 switch, session-stop, and missing-rule states; `max_draws` cannot be fixed by
 switching trays. The fast path uses depth one and does not claim the next tray
 will be better without empirical tray-state data.
+
+### E19 — Practical card spending
+
+When direct draw passes every stop rule, a card below
+`min_tool_uplift_pp` cannot beat no card. When direct draw fails, a card with a
+nonzero fully qualifying branch remains eligible as a rescue route. Report
+primary uplift, threshold result, and expected cards used.
 
 ## 7. Review output template
 
