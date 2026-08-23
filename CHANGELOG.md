@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added GitHub Actions checks for the full test suite, public-package
+  validation, history validation, and whitespace errors on pull requests and
+  `main`.
 - Added `min_tool_uplift_pp`, defaulting to `tie_tolerance_pp`, so a
   direct-ready tray does not spend cards on immaterial primary uplift.
 - Preserved rescue cards when direct draw fails but a card can create a

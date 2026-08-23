@@ -56,6 +56,26 @@ class PublicCheckTests(unittest.TestCase):
             messages,
         )
 
+    def test_exact_allowlisted_workflow_yml_is_approved(self):
+        exact, prefixes = public_check.parse_allowlist(
+            ".github/workflows/ci.yml\n"
+        )
+        record = public_check.Record(
+            ".github/workflows/ci.yml",
+            b"name: CI\n",
+            "100644",
+            "test",
+        )
+
+        self.assertEqual(
+            public_check.validate_records(
+                [record],
+                exact,
+                prefixes,
+            ),
+            [],
+        )
+
     def test_sensitive_content_is_reported_without_echoing_values(self):
         local_path = "/" + "Users" + "/alice/project"
         email = "alice" + "@personal.test"

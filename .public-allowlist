@@ -1,6 +1,7 @@
 # Exact files
 .gitignore
 .public-allowlist
+.github/workflows/ci.yml
 .skillshare/.gitignore
 .skillshare/config.yaml
 PUBLICATION_POLICY.md
