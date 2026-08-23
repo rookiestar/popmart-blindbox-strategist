@@ -33,118 +33,44 @@ Use these structures as output contracts. Keep the prose direct; the probability
 
 Cover every regular design. Cite current claims inline. If only QianDao is usable, cap confidence at medium and name the missing checks.
 
-## B. First tray strategy
+## B. Standard formal decision report
 
-```markdown
-## 结论
+Use for the first confirmed recommendation, a kept tray, every real
+hint/display update, and every post-open decision about another draw.
 
-**当前首选：X号。**
+机器契约的唯一事实来源是经过校验的 renderer：
 
-- 最讨厌款1：...%
-- 最讨厌款2：...%
-- 任一不喜欢款：...%
-- 任一喜欢款：...%
-- 最爱合计：...%（若设置最爱停止线）
-- 最喜欢款：...%
-- 硬雷合计：...%（若设置）
-- 平均评分：...（若设置）
-
-一句话解释 why X beats Y under the declared objective.
-
-## 模型与识别
-
-- 策略：稳妥避雷 / 守住底线 / 整体最满意 / 随便中个喜欢 / 只冲最爱 / 保值优先
-- 规则：用一句话说明本轮如何选盒
-- 整盒假设：...
-- 已售未知盒：保留为潜变量的盒号
-- 合法整盒排列：N（若为混合模型则列情景后验）
-- 概率口径：在整盒无重复、线索真实、常规款范围/声明情景成立条件下的条件概率
-- 提示机制：均匀返回未显示错误标签（假设/已确认）
-- 模型警告：`regular_only_scope` / `hint_mechanism_assumed`（适用时）
-- 关键不确定性：...
-- 隐藏款：默认未计入
-
-## 当前 TOP 3
-
-| 排名 | 盒号 | 喜欢1 | 喜欢2 | 喜欢3 | 喜欢合计 | 不喜欢1 | 不喜欢2 | 不喜欢3 | 不喜欢合计 |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-
-### 1）X号：所有未显式排除选项
-| 概率排序 | 款式 | 概率 | 标签 |
-|---:|---|---:|---|
-
-### 2）Y号：所有未显式排除选项
-...
-
-### 3）Z号：所有未显式排除选项
-...
-
-> 0% 的未显式排除项保留在表尾，并标记“被全局整盒约束排除”。
-
-## 是否继续
-
-**继续抽 X号 / 停止。**
-
-- 喜欢款概率：...（门槛：...）
-- 最爱款合计概率：...（门槛：...）
-- 不喜欢款概率：...（上限：...）
-- 硬雷概率：...（上限：...）
-- 平均评分：...（门槛：...）
-- 已抽：...盒（最多：...盒）
-
-只列用户实际设置的条件；任一条件失败就明确建议停止。
-
-## 下一步动作
-
-**下一步：直接抽 / 停止 / 使用提示卡 / 使用显示卡。**
-
-- 不用卡基线：直接抽 X号 / 停止
-- 实用收益门槛：...pp；本动作主指标提升：...pp；通过/未通过
-- 若推荐卡片：使用后自适应选择的期望为喜欢合计 ...%，不喜欢合计 ...%
-- 若推荐卡片：结果后仍建议抽盒的概率为 ...%
-- 若推荐卡片：自适应策略预计消耗 ... 张卡
-- 若推荐卡片：相对不用卡，喜欢 +...pp；不喜欢 -...pp
-- 若推荐卡片：列关键分支，并在真实结果后重算
-- 若启用两步：只执行首步；分别说明首步身份是否改变、终局是否等价，
-  并列“两卡终局相对一卡终局”的增益
+```bash
+python3 scripts/blindbox_solver.py <state.json> --format markdown
 ```
 
-Render `regular_only_scope` through the single hidden-design line in the
-template; do not repeat the same warning elsewhere in the user-facing reply.
+Return stdout unchanged. Do not handwrite, paraphrase, reorder, shorten, or
+append a second recommendation. The renderer itself guarantees:
 
-The “all options” tables must be complete for each top-three box. Do not show only liked and disliked subsets.
+- a clear conclusion and exactly three concise decision explanations;
+- the quantified first-versus-second trade-off;
+- TOP 3 summary plus one design-by-box matrix covering every design;
+- distinct `已排除` and `0.00%（全局约束）` cells;
+- every configured stop line and its pass/fail state;
+- one executable next action: 直接抽 / 停止 / 使用提示卡 / 使用显示卡;
+- the `条件概率` scope and applicable `regular_only_scope` /
+  `hint_mechanism_assumed` warnings.
 
-## C. Update after a hint/display result
+Completion means the command exits 0 after report validation. On failure,
+correct the state and rerun; never fall back to a partial manual report.
 
-```markdown
-## 更新结论
+## C. Update after a hint/display/open result
 
-真实新增信息：X号不是/显示为 A。
+1. Decide whether the message is an actual event or a counterfactual.
+2. Apply the actual event only to the active tray; update the session-level
+   tool and draw counters.
+3. Preserve the confirmed strategy, preference scores, stop lines, accepted
+   tray lock, and prior trays.
+4. Run template B's command and return stdout unchanged.
 
-**更新后首选：Y号。**
-
-| 指标 | 更新前 | 更新后 | 变化 |
-|---|---:|---:|---:|
-| 喜欢合计 | ... | ... | ...pp |
-| 最喜欢款 | ... | ... | ...pp |
-| 不喜欢合计 | ... | ... | ...pp |
-
-## 更新后的 TOP 3
-
-[Repeat the full top-three contract, including complete option lists.]
-
-## 下一步动作
-
-- 剩余提示卡：N
-- 剩余显示卡：M
-- 合格端锁定：未锁定 / 已锁定 tray-X；换端前需显式释放
-- 动作排名：直接抽/停止、提示卡、显示卡
-- 当前建议：...
-- 两步规划（若启用）：首步...；身份未变/已变；终局等价/不等价；
-  预计用卡...张；两卡终局相对一卡终局...pp
-```
-
-Every update must recompute the whole tray. Do not only update the affected box.
+“重来，需求不变” and “换一端，需求不变” preserve the decision contract.
+“X号排除了Y” and “X号显示为Y” trigger the same complete report after the
+state update. The user never needs to ask again for “所有选项”.
 
 ## D. Counterfactual branch
 
@@ -194,6 +120,13 @@ When the user changes the goal to “只冲喜欢款”:
 ## G. Timed tray screening
 
 Use before committing cards or a purchase to a 3–5 minute tray:
+
+```bash
+python3 scripts/blindbox_solver.py <state.json> \
+  --screen-tray --format markdown
+```
+
+Return stdout unchanged. This is the only compact decision surface.
 
 ```markdown
 ## 端筛选

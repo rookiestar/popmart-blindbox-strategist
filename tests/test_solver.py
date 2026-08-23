@@ -2003,6 +2003,46 @@ class SolverTests(unittest.TestCase):
         self.assertIn("### 已确认变更", output)
         self.assertIn("最多抽盒数：1盒 → 2盒", output)
 
+    def test_markdown_explains_only_the_latest_actual_event(self):
+        accepted = session_lock_fixture()["accepted_session"]
+
+        exit_code, output, error = self.cli_output(
+            accepted,
+            "--format",
+            "markdown",
+        )
+
+        self.assertEqual(exit_code, 0, error)
+        self.assertIn("最新信息：已保留 tray-a", output)
+        self.assertNotIn("最新信息：已切换至 tray-a", output)
+
+        overridden = session_lock_fixture()["accepted_session"]
+        overridden["preferences"]["stop_rules"]["min_like_any_pp"] = 55
+        overridden["events"].append(
+            {
+                "seq": 3,
+                "type": "stop_rule_override",
+                "tray_id": "tray-a",
+                "rule": "min_like_any_pp",
+                "old_value": 60,
+                "new_value": 55,
+                "reason": "用户确认调整喜欢率门槛",
+            }
+        )
+
+        exit_code, output, error = self.cli_output(
+            overridden,
+            "--format",
+            "markdown",
+        )
+
+        self.assertEqual(exit_code, 0, error)
+        self.assertIn(
+            "最新信息：已将喜欢款至少从 60.00% 调整为 55.00%",
+            output,
+        )
+        self.assertNotIn("最新信息：已保留 tray-a", output)
+
     def test_markdown_screening_stays_compact(self):
         raw = base_state()
         raw["preferences"]["stop_rules"] = {

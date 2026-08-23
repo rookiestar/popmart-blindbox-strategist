@@ -18,7 +18,8 @@ Read only what the current stage needs:
 - `references/preference-strategies.md` when capturing scores, choosing a strategy, or deciding whether to stop.
 - `references/tray-screening.md` when a timed tray must be kept or released.
 - `references/probability-model.md` before running or interpreting the solver.
-- `references/output-templates.md` before replying with a strategy or update.
+- `references/output-templates.md` for market, screening, intake, review, and
+  the standard-report handoff boundary.
 - `references/review-and-evals.md` after a real draw or when improving this skill.
 - Run `scripts/blindbox_solver.py` for deterministic tray-level calculations.
 - Run `scripts/qiandao_market_snapshot.py` for the mainland resale fast path.
@@ -42,6 +43,9 @@ Read only what the current stage needs:
 15. **Honor an accepted tray.** Once a tray is accepted, keep it locked until
     the user explicitly releases it with a reason. Record any stop-rule change
     with its old value, new value, and confirmed reason.
+16. **Relay the validated report.** Every formal draw decision uses the
+    solver's Markdown renderer as the sole user-facing decision body. Do not
+    paraphrase, reorder, shorten, or rebuild its required sections.
 
 ## Stage 0 — Guided intake
 
@@ -140,10 +144,10 @@ Read `references/tray-screening.md`, then run:
 
 ```bash
 python3 scripts/blindbox_solver.py <state.json> \
-  --screen-tray --digits 10
+  --screen-tray --format markdown
 ```
 
-Return the compact screening result and reusable acceptance lines first.
+原样转交 stdout 中的快报。
 Treat raw clue count as non-diagnostic. Run depth two and the complete TOP 3
 report only after the user keeps the tray. When the user accepts a qualifying
 tray, set `accepted_tray_id` and append `tray_accepted`. A later switch requires
@@ -151,11 +155,17 @@ tray, set `accepted_tray_id` and append `tray_accepted`. A later switch requires
 
 ## Stage 3 — Compute current strategy
 
-Run:
+初次正式建议、保留当前端后的正式决策、真实提示或显示结果，以及开盒后的追抽判断，
+都运行：
 
 ```bash
-python3 scripts/blindbox_solver.py <state.json> --digits 10
+python3 scripts/blindbox_solver.py <state.json> --format markdown
 ```
+
+该入口自动执行一次道具规划、完整性校验和 Markdown 渲染。原样转交 stdout
+作为完整答复；不得手工摘要、删节概率矩阵、改写推荐动作或在前后另加一份建议。
+只有命令退出码为 0 且输出了标准报告，正式决策才算完成。若命令失败，修正状态后
+重跑；在成功前不提供手工降级建议。标准报告同时给出条件概率口径和必要模型警告。
 
 Use these user-facing strategy names:
 
@@ -171,26 +181,6 @@ scoring, and stopping conditions. Keep `tie_tolerance_pp: 0.5` unless the user
 requests strict mathematical ordering. Unless explicitly overridden,
 `min_tool_uplift_pp` inherits the same value.
 
-### Required calculation output
-
-Always provide:
-
-- model assumptions and unresolved uncertainty;
-- the machine-readable model scope, hint-mechanism status, and warning codes;
-- one sentence labeling percentages as `条件概率` under the declared
-  complete-case, clue, regular/mixture, and relevant tool assumptions;
-- exact valid-assignment count for the regular-only scenario; show mixture weights only when the user explicitly enabled hidden-design modeling;
-- current top-three boxes;
-- for each top-three box, **every not-explicitly-excluded design sorted by posterior probability descending**;
-- liked-item probabilities by rank, total liked probability, disliked-item probabilities by rank, and total disliked probability;
-- a direct recommendation and the exact trade-off against the next-best alternatives;
-- the strategy name and one-sentence rule;
-- hard-avoid probability and expected score when configured;
-- combined `+10` favorite probability when its stop line is configured;
-- whether to draw again, with every failed stopping condition.
-
-Percentages shown to the user should normally use two decimals, but calculations must use unrounded values. Confirm that each displayed full distribution sums to approximately 100%; explain any rounding difference.
-
 ## Stage 4 — Plan hint and display cards
 
 Assumptions unless the user reports different platform behavior:
@@ -205,17 +195,14 @@ evidence confirms the mechanism. When an assumed mechanism affects planning,
 surface `hint_mechanism_assumed` instead of presenting card value as
 unconditional precision.
 
-Run one-step adaptive planning by default:
-
-```bash
-python3 scripts/blindbox_solver.py <state.json> --plan-one --digits 10
-```
+The standard Stage 3 command runs one-step adaptive planning by default.
 
 When the user explicitly wants lookahead, at least two cards remain, and the
 online timer allows a slower exact calculation, optionally run:
 
 ```bash
-python3 scripts/blindbox_solver.py <state.json> --plan-depth 2 --digits 10
+python3 scripts/blindbox_solver.py <state.json> \
+  --plan-depth 2 --format markdown
 ```
 
 Then:
@@ -225,23 +212,22 @@ Then:
    passes every stop rule, spend a card only if normalized primary uplift
    reaches `min_tool_uplift_pp`. When direct draw fails, keep a card eligible
    if any outcome branch passes every stop rule. Numerical ties use no card.
-2. Quantify expected uplift in liked probability and expected change in disliked probability.
-3. Show the important conditional branches: which outcomes make another box overtake the current leader.
-4. For multiple available tools, give a provisional second/third priority but instruct that the calculation must be rerun after the actual first outcome.
+2. Compute expected uplift in liked probability and expected change in
+   disliked probability before ranking a card.
+3. Keep conditional branches in the planner. The formal report shows only the
+   decision-relevant reason; expose branches only for an explicit audit.
+4. For multiple available tools, execute only the rendered first action and
+   rerun after its real outcome.
 5. If the platform forces simultaneous use, rank eligible boxes by one-step value of information and avoid spending multiple tools on near-duplicate boxes unless diversification is still optimal.
 6. Never target a box whose `tool_used` is already true.
 7. If the user explicitly enabled a hidden mixture, block exact hint-card planning when hidden designs cannot appear as hint labels.
-8. Report `expected_tools_used`. Equivalent terminal policies prefer fewer
-   cards. For depth two, report only the first action, whether its identity
-   changed from depth one, whether terminal value is equivalent, and
-   `gain_vs_one_card_horizon`. Explain that this gain compares two-card versus
-   one-card horizons; it does not prove rolling one-step replanning is worse.
-9. The plan payload is compact by default: branches carry only the decision
-   summary and `action_ranking` keeps the top 3 actions (the rest appear as
-   `other_actions_ranked` one-line summaries). Depth two expands the second
-   layer only for the top 3 depth-1 card actions; truncated actions are
-   labelled `depth_evaluated: 1`. For a full audit payload rerun with
-   `--full-branches --top-actions 0 --beam-width 0`.
+8. Keep `expected_tools_used`, depth-one identity, terminal equivalence, and
+   `gain_vs_one_card_horizon` in the planner. Equivalent terminal policies
+   prefer fewer cards; the renderer compresses these into the executable
+   action and its reason.
+9. The renderer chooses and explains the executable first action. Use JSON
+   audit flags only to diagnose a failure; never substitute their payload for
+   the formal Markdown reply.
 
 ### Whether to acquire more tools
 
@@ -271,12 +257,31 @@ When the user reports a hint or display result:
    rule, old value, new value, event order, active tray, and concise reason.
 7. Recompute the active tray from session-wide tool and draw counters. Retain
    earlier tray reports for cross-tray review.
-8. Return the same required top-three output, including full sorted option distributions.
+8. Run the Stage 3 Markdown command and 原样转交 stdout. This applies to every
+   actual clue, display, and opened-result follow-up before another draw.
 9. Do not let sunk tool cost influence the next choice.
+
+### Short follow-ups
+
+- “重来，需求不变” means create or switch to the newly shown tray while
+  preserving the confirmed strategy, preferences, scores, stop lines, global
+  tool inventory, and draw count. Do not restart intake.
+- “换一端，需求不变” has the same preservation rule; run the compact
+  screening command only when the user is still comparing trays, otherwise
+  run the formal report.
+- “X号排除了Y” or “X号显示为Y” is a real active-tray update when the
+  conversation clearly identifies it as an actual result. Apply the event,
+  consume the stated tool, and rerun the formal report without waiting for
+  the user to ask for “所有选项”.
+- If the leading box changes, rely on the report's quantified comparison and
+  full matrix; do not explain the change from memory or omit the new TOP 3.
 
 ## Stage 6 — Final draw review
 
-When the user reports the purchased result, produce the review in `references/review-and-evals.md`.
+When the user reports the purchased result and asks whether to continue, first
+apply Stage 5 and return the standard report for the next draw. Produce the
+review in `references/review-and-evals.md` when the user asks for a review or
+the session ends.
 
 At minimum include:
 
@@ -303,9 +308,8 @@ At minimum include:
 - All probabilities came from the current global state.
 - A timed tray was screened by quality lines, not raw clue count; switching
   was not described as guaranteed improvement.
-- The top three each include a complete descending option list.
-- The recommendation follows the currently declared objective mode.
-- The displayed strategy uses its user-facing Chinese name and one-sentence rule.
+- Every formal decision command exited 0 and its stdout was relayed unchanged;
+  no partial manual summary replaced the standard report.
 - Market claims have current citations and confidence labels.
 - The model report labels probabilities as conditional and exposes
   `regular_only_scope` / `hint_mechanism_assumed` when applicable.

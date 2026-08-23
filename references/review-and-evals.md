@@ -260,6 +260,23 @@ status. Regular-only analysis emits `regular_only_scope`. A card plan using an
 unconfirmed uniform wrong-label mechanism also emits
 `hint_mechanism_assumed`; confirmed mechanisms clear only that warning.
 
+### E22 — Standard report handoff
+
+Initial recommendations, kept trays, real clue updates, and post-open
+continue/stop decisions run `blindbox_solver.py --format markdown` and return
+its validated stdout unchanged. The final reply contains the conclusion,
+three concise explanations, TOP 3 full probability matrix, all stop lines,
+next action, and model scope without a second manual summary.
+
+Run `tests/test_agent_report_contract.py` with
+`tests/fixtures/agent-report-regressions.json`. Its synthetic short turns cover
+“重来，需求不变”, a new exclusion, a changed leading box, and no qualifying
+box. The regression must consume each short message, verify the resulting
+state transition or preserved requirements, then reach the same complete user
+report without requiring the user to ask for “所有选项”. Before release, also
+give an independent Agent only this Skill, a synthetic prior state, and one
+short update; its reply must be the validated report without a manual wrapper.
+
 ## 7. Review output template
 
 ```markdown
