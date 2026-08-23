@@ -169,6 +169,34 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("直接抽 / 停止 / 使用提示卡 / 使用显示卡", output)
         self.assertIn("No-card action", evals)
 
+    def test_session_lock_and_model_warning_contracts_are_discoverable(self):
+        skill = (ROOT / "SKILL.md").read_text()
+        schema = (ROOT / "references" / "state-schema.md").read_text()
+        probability = (
+            ROOT / "references" / "probability-model.md"
+        ).read_text()
+        output = (ROOT / "references" / "output-templates.md").read_text()
+        evals = (ROOT / "references" / "review-and-evals.md").read_text()
+
+        for token in (
+            "accepted_tray_id",
+            "tray_accepted",
+            "tray_released",
+            "stop_rule_override",
+        ):
+            self.assertIn(token, skill)
+            self.assertIn(token, schema)
+        for token in (
+            "regular_only_scope",
+            "hint_mechanism_assumed",
+            "条件概率",
+        ):
+            self.assertIn(token, skill)
+            self.assertIn(token, probability)
+            self.assertIn(token, output)
+        self.assertIn("Accepted-tray lock and overrides", evals)
+        self.assertIn("Conditional-probability warnings", evals)
+
     def test_timed_tray_screening_fast_path_is_discoverable(self):
         skill = (ROOT / "SKILL.md").read_text()
         screening_path = ROOT / "references" / "tray-screening.md"
@@ -183,6 +211,7 @@ class SkillContractTests(unittest.TestCase):
             "ready",
             "tool_dependent",
             "switch",
+            "accepted_review",
             "session_stop",
             "needs_acceptance_rules",
         ):

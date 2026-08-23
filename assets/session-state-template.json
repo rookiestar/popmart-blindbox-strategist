@@ -3,7 +3,11 @@
   "model": {
     "type": "unique_regular",
     "designs": [],
-    "hint_labels": []
+    "hint_labels": [],
+    "hint_mechanism": {
+      "type": "uniform_wrong_label",
+      "status": "assumed"
+    }
   },
   "boxes": [],
   "preferences": {

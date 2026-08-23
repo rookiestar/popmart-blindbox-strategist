@@ -91,7 +91,20 @@ SESSION_EVENT_TYPES = {
     "hint_used",
     "display_used",
     "opened_result",
+    "tray_accepted",
+    "tray_released",
+    "stop_rule_override",
 }
+STOP_RULE_KEYS = {
+    "min_like_any_pp",
+    "min_favorite_any_pp",
+    "max_dislike_any_pp",
+    "max_hard_avoid_pp",
+    "min_expected_score",
+    "max_draws",
+}
+HINT_MECHANISM_TYPES = {"uniform_wrong_label"}
+HINT_MECHANISM_STATUSES = {"assumed", "confirmed"}
 
 
 @dataclass(frozen=True)
@@ -163,6 +176,38 @@ def _build_score_tiers(scores: Mapping[str, float]) -> Dict[str, List[str]]:
     return tiers
 
 
+def _normalize_hint_mechanism(model: MutableMapping[str, Any]) -> Dict[str, str]:
+    raw = model.get("hint_mechanism")
+    if raw is None:
+        mechanism = {
+            "type": "uniform_wrong_label",
+            "status": "assumed",
+        }
+    elif isinstance(raw, str):
+        mechanism = {
+            "type": raw.strip(),
+            "status": "assumed",
+        }
+    elif isinstance(raw, Mapping):
+        mechanism = {
+            "type": str(raw.get("type", "")).strip(),
+            "status": str(raw.get("status", "assumed")).strip(),
+        }
+    else:
+        raise StateError("model.hint_mechanism must be a string or object")
+
+    if mechanism["type"] not in HINT_MECHANISM_TYPES:
+        raise StateError(
+            "model.hint_mechanism.type must be uniform_wrong_label"
+        )
+    if mechanism["status"] not in HINT_MECHANISM_STATUSES:
+        raise StateError(
+            "model.hint_mechanism.status must be assumed or confirmed"
+        )
+    model["hint_mechanism"] = mechanism
+    return mechanism
+
+
 def _normalize_state(raw: Mapping[str, Any]) -> Dict[str, Any]:
     state = copy.deepcopy(dict(raw))
     boxes = state.get("boxes")
@@ -232,6 +277,7 @@ def _normalize_state(raw: Mapping[str, Any]) -> Dict[str, Any]:
         scenarios = [Scenario(s.name, s.prior / prior_sum, s.designs) for s in scenarios]
     else:
         raise StateError(f"unsupported model.type: {model_type}")
+    _normalize_hint_mechanism(model)
 
     union_designs = set(d for s in scenarios for d in s.designs)
     hint_labels = model.get("hint_labels")
@@ -474,6 +520,40 @@ def _normalize_state(raw: Mapping[str, Any]) -> Dict[str, Any]:
     return state
 
 
+def _normalize_stop_rule_override_value(
+    rule: str, value: Any
+) -> float | int | None:
+    if value is None:
+        return None
+    if rule == "max_draws":
+        try:
+            normalized = int(value)
+        except (TypeError, ValueError) as exc:
+            raise StateError(
+                "stop_rule_override max_draws values must be integers or null"
+            ) from exc
+        if normalized < 0:
+            raise StateError(
+                "stop_rule_override max_draws values must be non-negative"
+            )
+        return normalized
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError) as exc:
+        raise StateError(
+            f"stop_rule_override {rule} values must be numeric or null"
+        ) from exc
+    if not math.isfinite(normalized):
+        raise StateError(
+            f"stop_rule_override {rule} values must be finite"
+        )
+    if rule != "min_expected_score" and not 0 <= normalized <= 100:
+        raise StateError(
+            f"stop_rule_override {rule} values must be between 0 and 100"
+        )
+    return normalized
+
+
 def _normalize_session_event(
     raw_event: Mapping[str, Any],
     expected_seq: int,
@@ -503,7 +583,50 @@ def _normalize_session_event(
     event["type"] = event_type
     event["tray_id"] = tray_id
 
-    if event_type == "tray_switch":
+    if event_type in {"tray_switch", "tray_accepted"}:
+        if "reason" in event:
+            event["reason"] = str(event["reason"]).strip()
+        return event
+
+    if event_type == "tray_released":
+        reason = str(event.get("reason", "")).strip()
+        if not reason:
+            raise StateError(
+                f"session event {seq}: tray release requires a concise reason"
+            )
+        event["reason"] = reason
+        return event
+
+    if event_type == "stop_rule_override":
+        rule = str(event.get("rule", "")).strip()
+        if rule not in STOP_RULE_KEYS:
+            raise StateError(
+                f"session event {seq}: unsupported stop rule {rule!r}; "
+                f"use one of {sorted(STOP_RULE_KEYS)}"
+            )
+        old_value = _normalize_stop_rule_override_value(
+            rule, event.get("old_value")
+        )
+        new_value = _normalize_stop_rule_override_value(
+            rule, event.get("new_value")
+        )
+        if old_value == new_value:
+            raise StateError(
+                f"session event {seq}: stop rule override must change the value"
+            )
+        reason = str(event.get("reason", "")).strip()
+        if not reason:
+            raise StateError(
+                f"session event {seq}: stop rule override requires a concise reason"
+            )
+        event.update(
+            {
+                "rule": rule,
+                "old_value": old_value,
+                "new_value": new_value,
+                "reason": reason,
+            }
+        )
         return event
 
     box_id = str(event.get("box_id", "")).strip()
@@ -562,6 +685,7 @@ def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
         return {
             "session_schema_version": SESSION_SCHEMA_VERSION,
             "active_tray_id": tray_id,
+            "accepted_tray_id": None,
             "tools": copy.deepcopy(state["tools"]),
             "draws_used": draws_used,
             "events": [],
@@ -618,6 +742,14 @@ def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
     active_tray_id = str(raw.get("active_tray_id", "")).strip()
     if active_tray_id not in tray_states:
         raise StateError("active_tray_id must identify one session tray")
+    raw_accepted_tray_id = raw.get("accepted_tray_id")
+    accepted_tray_id = (
+        None
+        if raw_accepted_tray_id in (None, "")
+        else str(raw_accepted_tray_id).strip()
+    )
+    if accepted_tray_id is not None and accepted_tray_id not in tray_states:
+        raise StateError("accepted_tray_id must identify one session tray")
 
     opened_total = sum(
         1
@@ -647,8 +779,44 @@ def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
     ]
     tool_event_boxes: set[Tuple[str, str]] = set()
     opened_event_boxes: set[Tuple[str, str]] = set()
+    lifecycle_lock: Optional[str] = None
+    current_event_tray: Optional[str] = None
+    override_chains: Dict[str, List[Dict[str, Any]]] = {}
     for event in events:
-        if event["type"] in {"hint_used", "display_used"}:
+        event_type = event["type"]
+        tray_id = event["tray_id"]
+        if event_type == "tray_switch":
+            if lifecycle_lock is not None and tray_id != lifecycle_lock:
+                raise StateError(
+                    "release the accepted tray before switching to another tray"
+                )
+            current_event_tray = tray_id
+        elif event_type == "tray_accepted":
+            if current_event_tray is not None and tray_id != current_event_tray:
+                raise StateError(
+                    "tray_accepted must target the current event tray"
+                )
+            if lifecycle_lock is not None:
+                raise StateError(
+                    "release the accepted tray before accepting another tray"
+                )
+            lifecycle_lock = tray_id
+        elif event_type == "tray_released":
+            if lifecycle_lock != tray_id:
+                raise StateError(
+                    "tray_released must target the currently accepted tray"
+                )
+            lifecycle_lock = None
+        elif event_type == "stop_rule_override":
+            if (
+                current_event_tray is not None
+                and tray_id != current_event_tray
+            ):
+                raise StateError(
+                    "stop_rule_override must target the current event tray"
+                )
+            override_chains.setdefault(event["rule"], []).append(event)
+        elif event_type in {"hint_used", "display_used"}:
             key = (event["tray_id"], event["box_id"])
             if key in tool_event_boxes or key in opened_event_boxes:
                 raise StateError(
@@ -656,13 +824,35 @@ def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
                     f"box {key[1]!r} in tray {key[0]!r}"
                 )
             tool_event_boxes.add(key)
-        elif event["type"] == "opened_result":
+        elif event_type == "opened_result":
             key = (event["tray_id"], event["box_id"])
             if key in opened_event_boxes:
                 raise StateError(
                     f"session events repeat opened_result for tray/box {key}"
                 )
             opened_event_boxes.add(key)
+
+    if lifecycle_lock != accepted_tray_id:
+        raise StateError(
+            "accepted_tray_id must match the tray acceptance/release event history"
+        )
+    if accepted_tray_id is not None and accepted_tray_id != active_tray_id:
+        raise StateError(
+            "the accepted tray must remain active until an explicit release event"
+        )
+
+    final_stop_rules = tray_states[active_tray_id]["preferences"]["stop_rules"]
+    for rule, rule_events in override_chains.items():
+        for previous, current in zip(rule_events, rule_events[1:]):
+            if current["old_value"] != previous["new_value"]:
+                raise StateError(
+                    f"stop_rule_override chain for {rule} is not contiguous"
+                )
+        final_value = final_stop_rules.get(rule)
+        if rule_events[-1]["new_value"] != final_value:
+            raise StateError(
+                f"latest stop_rule_override for {rule} must match session preferences"
+            )
 
     state_tool_boxes = {
         (tray_id, box["id"])
@@ -695,6 +885,7 @@ def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
     return {
         "session_schema_version": version,
         "active_tray_id": active_tray_id,
+        "accepted_tray_id": accepted_tray_id,
         "tools": copy.deepcopy(active_state["tools"]),
         "draws_used": draws_used,
         "events": events,
@@ -1803,6 +1994,74 @@ def assess_tray(
     }
 
 
+def _model_reporting_contract(
+    state: Mapping[str, Any],
+    *,
+    hint_planning_active: bool,
+) -> Tuple[Dict[str, Any], List[Dict[str, str]]]:
+    model_type = state["model"].get("type", "unique_regular")
+    regular_only = model_type == "unique_regular"
+    hint_mechanism = copy.deepcopy(state["model"]["hint_mechanism"])
+    conditional_on = [
+        "complete_no_duplicate_case",
+        "truthful_clues",
+    ]
+    if regular_only:
+        conditional_on.append("regular_only_scope")
+        statement = (
+            "以下概率是在常规款整盒无重复、端内模型成立且线索真实条件下"
+            "计算的条件概率。"
+        )
+    else:
+        conditional_on.append("declared_scenario_priors")
+        statement = (
+            "以下概率是在所声明情景先验、整盒无重复、端内模型成立且线索"
+            "真实条件下计算的条件概率。"
+        )
+    if hint_planning_active:
+        conditional_on.append("declared_hint_mechanism")
+
+    warnings: List[Dict[str, str]] = []
+    if regular_only:
+        warnings.append(
+            {
+                "code": "regular_only_scope",
+                "severity": "warning",
+                "applies_to": "all_probabilities",
+                "message": (
+                    "当前仅建模常规款；隐藏款及替换规则未计入，所有百分比均为"
+                    "常规款范围下的条件概率。"
+                ),
+            }
+        )
+    if hint_planning_active and hint_mechanism["status"] == "assumed":
+        warnings.append(
+            {
+                "code": "hint_mechanism_assumed",
+                "severity": "warning",
+                "applies_to": "tool_plan",
+                "message": (
+                    "提示卡按均匀返回一个尚未显示的错误标签建模；机制未经"
+                    "确认，道具价值仅在该假设成立时有效。"
+                ),
+            }
+        )
+
+    return (
+        {
+            "scope": (
+                "regular_only" if regular_only else "declared_mixture"
+            ),
+            "hidden_designs_included": not regular_only,
+            "probability_kind": "conditional",
+            "conditional_on": conditional_on,
+            "probability_statement": statement,
+            "hint_mechanism": hint_mechanism,
+        },
+        warnings,
+    )
+
+
 def build_report(
     state: Mapping[str, Any],
     include_plan: bool = False,
@@ -1850,6 +2109,19 @@ def build_report(
         )
         all_box_rows.append(row)
 
+    model_contract, model_warnings = _model_reporting_contract(
+        state,
+        hint_planning_active=(
+            plan_depth is not None
+            and state["tools"]["hint_cards"] > 0
+            and any(
+                box["status"] == AVAILABLE_STATUS
+                and not box["tool_used"]
+                and box["known"] is None
+                for box in state["boxes"]
+            )
+        ),
+    )
     model_summary: Dict[str, Any] = {
         "type": state["model"].get("type", "unique_regular"),
         "exact_valid_assignments": posterior.exact_valid_assignments,
@@ -1861,6 +2133,7 @@ def build_report(
             "Each scenario is a complete no-duplicate case; sold-but-unknown boxes "
             "remain latent and continue to constrain the other boxes."
         ),
+        **model_contract,
     }
 
     scores = state["preferences"]["scores"]
@@ -1894,6 +2167,7 @@ def build_report(
         "ranking": all_box_rows,
         "top_3": [row["box_id"] for row in all_box_rows[:3]],
         "draw_decision": evaluate_draw_decision(state, all_box_rows[0]),
+        "model_warnings": model_warnings,
     }
     if warnings:
         report["warnings"] = warnings
@@ -1917,6 +2191,7 @@ def build_report(
                     "preference_summary",
                     "tool_policy",
                     "model_summary",
+                    "model_warnings",
                     "tray_screening",
                 )
             }
@@ -1936,6 +2211,7 @@ def build_session_report(
 ) -> Dict[str, Any]:
     """Build one reader-facing report that preserves every tray."""
     active_tray_id = session["active_tray_id"]
+    accepted_tray_id = session["accepted_tray_id"]
     tray_reports: Dict[str, Dict[str, Any]] = {}
     for tray_id, state in session["_tray_states"].items():
         is_active = tray_id == active_tray_id
@@ -1946,21 +2222,116 @@ def build_session_report(
             screen_tray=screen_tray if is_active else False,
             beam_width=beam_width,
         )
+        if "tray_screening" in tray_reports[tray_id]:
+            profile = tray_reports[tray_id]["tray_screening"][
+                "acceptance_profile"
+            ]
+            decision = tray_reports[tray_id]["tray_screening"][
+                "direct_draw_decision"
+            ]
+        else:
+            profile = _tray_acceptance_profile(
+                state,
+                tray_reports[tray_id]["ranking"][0],
+            )
+            decision = tray_reports[tray_id]["draw_decision"]
+        tray_reports[tray_id]["tray_lock"] = {
+            "is_accepted": tray_id == accepted_tray_id,
+            "accepted_tray_id": accepted_tray_id,
+            "release_required_before_switch": accepted_tray_id is not None,
+            "currently_qualified": (
+                bool(profile)
+                and decision["should_draw"]
+                and all(check["passed"] for check in profile)
+            ),
+        }
 
     active_state = session["_tray_states"][active_tray_id]
     max_draws = active_state["preferences"]["stop_rules"].get("max_draws")
+    active_report = tray_reports[active_tray_id]
+    active_decision = active_report.get("draw_decision")
+    if active_decision is None:
+        active_decision = active_report["tray_screening"][
+            "direct_draw_decision"
+        ]
+    active_tool_action: Optional[Mapping[str, Any]] = None
+    if "next_tool_plan" in active_report:
+        active_tool_action = active_report["next_tool_plan"][
+            "recommended_action"
+        ]
+    elif "tray_screening" in active_report:
+        active_tool_action = active_report["tray_screening"][
+            "one_card_action"
+        ]
+
+    if accepted_tray_id is None:
+        session_recommendation = {
+            "action": "follow_active_tray_report",
+            "tray_id": active_tray_id,
+            "release_required_before_switch": False,
+        }
+    else:
+        session_recommendation = {
+            "action": (
+                "continue_with_accepted_tray"
+                if active_decision["should_draw"]
+                else (
+                    "continue_with_accepted_tray_tool_plan"
+                    if (
+                        active_tool_action is not None
+                        and active_tool_action["tool"] != "none"
+                        and float(
+                            active_tool_action["expected_draw_probability"]
+                        )
+                        > 0
+                    )
+                    else "stop_or_release_accepted_tray"
+                )
+            ),
+            "tray_id": accepted_tray_id,
+            "release_required_before_switch": True,
+        }
+        screening = active_report.get("tray_screening")
+        if screening is not None:
+            screening["accepted_tray_id"] = accepted_tray_id
+            screening["release_required_before_switch"] = True
+            if screening["recommendation"] == "switch":
+                screening["unlocked_recommendation"] = "switch"
+                screening["status"] = "accepted_review"
+                screening["recommendation"] = "release_before_switch"
+
+    acceptance_events = [
+        copy.deepcopy(event)
+        for event in session["events"]
+        if event["type"] in {"tray_accepted", "tray_released"}
+    ]
+    stop_rule_overrides = [
+        copy.deepcopy(event)
+        for event in session["events"]
+        if event["type"] == "stop_rule_override"
+    ]
     return {
         "session_summary": {
             "session_schema_version": session["session_schema_version"],
             "active_tray_id": active_tray_id,
+            "accepted_tray_id": accepted_tray_id,
+            "lock_status": (
+                "accepted" if accepted_tray_id is not None else "open"
+            ),
             "tray_ids": list(session["_tray_states"]),
             "tools": copy.deepcopy(session["tools"]),
             "draws_used": session["draws_used"],
             "max_draws": max_draws,
             "event_count": len(session["events"]),
+            "stop_rule_override_count": len(stop_rule_overrides),
         },
+        "session_recommendation": session_recommendation,
         "tray_reports": tray_reports,
         "actual_events": copy.deepcopy(session["events"]),
+        "session_review": {
+            "acceptance_lifecycle": acceptance_events,
+            "stop_rule_overrides": stop_rule_overrides,
+        },
     }
 
 

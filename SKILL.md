@@ -39,6 +39,9 @@ Read only what the current stage needs:
 12. **Default to regular-only.** Do not research, price, model, or expand hidden designs. Write exactly once: `隐藏款：默认未计入`. Enter the hidden-design branch only when the user explicitly requests it.
 13. **Stay API-key-free.** Never require the user to configure a third-party search provider or API key. Use capabilities already available in the host, direct public fetches, or user-supplied links, HTML, and screenshots. Missing market tools must not block screenshot parsing or preference/probability analysis.
 14. **Guide before calculating.** A screenshot alone is enough to begin. Read visible facts first, ask only for subjective choices or unreadable blockers, and confirm a compact decision contract before the final calculation.
+15. **Honor an accepted tray.** Once a tray is accepted, keep it locked until
+    the user explicitly releases it with a reason. Record any stop-rule change
+    with its old value, new value, and confirmed reason.
 
 ## Stage 0 — Guided intake
 
@@ -142,7 +145,9 @@ python3 scripts/blindbox_solver.py <state.json> \
 
 Return the compact screening result and reusable acceptance lines first.
 Treat raw clue count as non-diagnostic. Run depth two and the complete TOP 3
-report only after the user keeps the tray.
+report only after the user keeps the tray. When the user accepts a qualifying
+tray, set `accepted_tray_id` and append `tray_accepted`. A later switch requires
+`tray_released` with a concise user-confirmed reason first.
 
 ## Stage 3 — Compute current strategy
 
@@ -171,6 +176,9 @@ requests strict mathematical ordering. Unless explicitly overridden,
 Always provide:
 
 - model assumptions and unresolved uncertainty;
+- the machine-readable model scope, hint-mechanism status, and warning codes;
+- one sentence labeling percentages as `条件概率` under the declared
+  complete-case, clue, regular/mixture, and relevant tool assumptions;
 - exact valid-assignment count for the regular-only scenario; show mixture weights only when the user explicitly enabled hidden-design modeling;
 - current top-three boxes;
 - for each top-three box, **every not-explicitly-excluded design sorted by posterior probability descending**;
@@ -190,6 +198,12 @@ Assumptions unless the user reports different platform behavior:
 - A hint card uniformly reveals one not-yet-shown wrong label for the selected box.
 - A display card reveals the true design, and the box remains available for selection.
 - A box can receive at most one user tool of either type.
+
+Keep the hint mechanism in `model.hint_mechanism`. Its default status is
+`assumed`; change it to `confirmed` only after the user or reliable platform
+evidence confirms the mechanism. When an assumed mechanism affects planning,
+surface `hint_mechanism_assumed` instead of presenting card value as
+unconditional precision.
 
 Run one-step adaptive planning by default:
 
@@ -250,10 +264,15 @@ When the user reports a hint or display result:
    `active_tray_id`.
 4. For an opened purchase, set `status: opened`, retain the known design,
    increment session `draws_used`, and append `opened_result`.
-5. Recompute the active tray from session-wide tool and draw counters. Retain
+5. For an accepted tray, retain `accepted_tray_id`. Before switching away,
+   append `tray_released` with the confirmed reason and clear the lock. Record
+   a new lock with `tray_accepted`.
+6. For a confirmed stop-rule change, append `stop_rule_override` with the
+   rule, old value, new value, event order, active tray, and concise reason.
+7. Recompute the active tray from session-wide tool and draw counters. Retain
    earlier tray reports for cross-tray review.
-6. Return the same required top-three output, including full sorted option distributions.
-7. Do not let sunk tool cost influence the next choice.
+8. Return the same required top-three output, including full sorted option distributions.
+9. Do not let sunk tool cost influence the next choice.
 
 ## Stage 6 — Final draw review
 
@@ -265,6 +284,7 @@ At minimum include:
 - whether the chosen box was optimal under the stated objective;
 - what the strongest alternative would have changed;
 - tool-by-tool information value and whether each changed the decision;
+- accepted-tray lifecycle and every stop-rule override;
 - decision quality versus outcome quality;
 - preference-model update, especially when a supposedly neutral item feels disappointing;
 - assumption audit;
@@ -277,6 +297,8 @@ At minimum include:
 - The real state was not contaminated by a counterfactual branch.
 - Every clue, tool, and opening stayed in its stable tray; remaining tools and
   draws used came from the session envelope.
+- An accepted tray was not bypassed without a recorded release; stop-rule
+  changes retained old/new values and the confirmed reason.
 - No box received more than one user tool.
 - All probabilities came from the current global state.
 - A timed tray was screened by quality lines, not raw clue count; switching
@@ -285,6 +307,8 @@ At minimum include:
 - The recommendation follows the currently declared objective mode.
 - The displayed strategy uses its user-facing Chinese name and one-sentence rule.
 - Market claims have current citations and confidence labels.
+- The model report labels probabilities as conditional and exposes
+  `regular_only_scope` / `hint_mechanism_assumed` when applicable.
 - The response contains exactly one `隐藏款：默认未计入` note unless the user explicitly enabled hidden-design modeling.
 - In guided mode, the decision contract was explicitly confirmed before the
   final exact recommendation.

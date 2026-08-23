@@ -2,6 +2,7 @@
   "session_schema_version": 1,
   "series": "synthetic-multi-tray",
   "active_tray_id": "tray-c",
+  "accepted_tray_id": null,
   "draws_used": 1,
   "preferences": {
     "liked": ["A"],

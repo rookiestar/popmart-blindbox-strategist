@@ -88,6 +88,7 @@ model, boxes, clues, known results, and `tool_used` flags.
   "session_schema_version": 1,
   "series": "合成系列",
   "active_tray_id": "tray-b",
+  "accepted_tray_id": null,
   "draws_used": 1,
   "preferences": {
     "liked": ["A"],
@@ -135,16 +136,26 @@ model, boxes, clues, known results, and `tool_used` flags.
 - `draws_used` must equal the opened-box total across all retained trays.
 - `tools` is the single remaining inventory used by every tray report.
 - `events` is append-only and uses contiguous `seq` values from `1`.
-- Supported events are `tray_switch`, `hint_used`, `display_used`, and
-  `opened_result`; their result fields must match the retained tray state.
+- Supported events are `tray_switch`, `hint_used`, `display_used`,
+  `opened_result`, `tray_accepted`, `tray_released`, and
+  `stop_rule_override`; result fields must match the retained state.
 - Tool and opening events must exactly cover the trays' `tool_used` and
   `opened` boxes; one box may have at most one tool event before opening.
+- `accepted_tray_id` is `null` or the currently locked tray. Its acceptance
+  lifecycle must match `tray_accepted` / `tray_released`; switching to another
+  tray while locked is invalid.
+- `tray_released` requires a concise reason. `stop_rule_override` requires the
+  rule, old value, new value, active tray, and a user-supplied or confirmed
+  reason; the latest new value must match session preferences.
 - A tray may not repeat session-level `preferences`, `tools`, or
   `market_values`.
 
 The CLI returns `session_summary`, `tray_reports` keyed by stable tray ID, and
-`actual_events`. Only the active tray receives a requested card plan or timed
-screening; every retained tray remains available for posterior review.
+`actual_events`. `session_recommendation` and each report's `tray_lock` prevent
+an accepted tray from being bypassed silently. `session_review` repeats only
+the acceptance lifecycle and stop-rule overrides needed for final review.
+Only the active tray receives a requested card plan or timed screening; every
+retained tray remains available for posterior review.
 
 ```bash
 python3 scripts/blindbox_solver.py \
@@ -153,6 +164,40 @@ python3 scripts/blindbox_solver.py \
 
 Legacy single-tray JSON remains valid. It is normalized internally as one
 implicit `tray-1` session while preserving the legacy report shape.
+
+### Accepted-tray lifecycle
+
+Accept only after the configured quality lines pass:
+
+```json
+{"seq": 2, "type": "tray_accepted", "tray_id": "tray-a", "reason": "all_acceptance_rules_passed"}
+```
+
+To compare another tray, release before the switch:
+
+```json
+{"seq": 3, "type": "tray_released", "tray_id": "tray-a", "reason": "用户确认继续比较其他端"}
+{"seq": 4, "type": "tray_switch", "tray_id": "tray-b"}
+```
+
+Set `accepted_tray_id` to `tray-a` while locked and to `null` after release.
+
+### Stop-rule override
+
+```json
+{
+  "seq": 5,
+  "type": "stop_rule_override",
+  "tray_id": "tray-b",
+  "rule": "max_draws",
+  "old_value": 1,
+  "new_value": 2,
+  "reason": "首抽未命中，用户确认再抽一盒"
+}
+```
+
+Use `null` for an absent old or new value. Multiple changes to the same rule
+must form a contiguous old-to-new chain.
 
 ## `model`
 
@@ -164,11 +209,18 @@ Use when there are exactly as many regular designs as tray positions and every r
 {
   "type": "unique_regular",
   "designs": ["A", "B", "C"],
-  "hint_labels": ["A", "B", "C"]
+  "hint_labels": ["A", "B", "C"],
+  "hint_mechanism": {
+    "type": "uniform_wrong_label",
+    "status": "assumed"
+  }
 }
 ```
 
 The order of `designs` has no statistical meaning.
+`hint_mechanism.status` defaults to `assumed`; use `confirmed` only when the
+platform behavior has been reliably confirmed. Unsupported mechanisms are
+rejected rather than approximated silently.
 
 ### Scenario mixture
 
@@ -408,6 +460,19 @@ After the user buys box 11 and confirms A:
 ```
 
 The known item continues to constrain all remaining boxes.
+
+### Accept or release a tray
+
+When every configured quality line passes and the user chooses to keep the
+tray, set `accepted_tray_id` and append `tray_accepted`. Before changing
+`active_tray_id` to another tray, append `tray_released` with the confirmed
+reason and clear `accepted_tray_id`.
+
+### Change a stopping condition
+
+Update the session-level `preferences.stop_rules`, then append
+`stop_rule_override` with the exact old/new values and reason. The event is
+part of the actual ledger and is repeated in `session_review`.
 
 ## Counterfactual branches
 

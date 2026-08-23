@@ -1,0 +1,196 @@
+{
+  "meta": {
+    "provenance": "synthetic"
+  },
+  "accepted_session": {
+    "session_schema_version": 1,
+    "series": "synthetic-accepted-tray",
+    "active_tray_id": "tray-a",
+    "accepted_tray_id": "tray-a",
+    "draws_used": 0,
+    "preferences": {
+      "liked": ["A"],
+      "disliked": ["C"],
+      "strategy": "随便中个喜欢",
+      "tie_tolerance_pp": 0.5,
+      "stop_rules": {
+        "min_like_any_pp": 60,
+        "max_draws": 2
+      }
+    },
+    "tools": {
+      "hint_cards": 1,
+      "display_cards": 0
+    },
+    "trays": [
+      {
+        "id": "tray-a",
+        "model": {
+          "type": "unique_regular",
+          "designs": ["A", "B", "C"],
+          "hint_labels": ["A", "B", "C"]
+        },
+        "boxes": [
+          {
+            "id": "1",
+            "excluded": ["C"],
+            "status": "available"
+          },
+          {
+            "id": "2",
+            "excluded": ["A"],
+            "status": "available"
+          },
+          {
+            "id": "3",
+            "excluded": [],
+            "status": "sold_unknown"
+          }
+        ]
+      },
+      {
+        "id": "tray-b",
+        "model": {
+          "type": "unique_regular",
+          "designs": ["A", "B", "C"],
+          "hint_labels": ["A", "B", "C"]
+        },
+        "boxes": [
+          {
+            "id": "1",
+            "excluded": ["B"],
+            "status": "available"
+          },
+          {
+            "id": "2",
+            "excluded": ["A"],
+            "status": "available"
+          },
+          {
+            "id": "3",
+            "excluded": [],
+            "status": "sold_unknown"
+          }
+        ]
+      }
+    ],
+    "events": [
+      {
+        "seq": 1,
+        "type": "tray_switch",
+        "tray_id": "tray-a"
+      },
+      {
+        "seq": 2,
+        "type": "tray_accepted",
+        "tray_id": "tray-a",
+        "reason": "all_acceptance_rules_passed"
+      }
+    ],
+    "meta": {
+      "provenance": "synthetic"
+    }
+  },
+  "override_session": {
+    "session_schema_version": 1,
+    "series": "synthetic-stop-rule-override",
+    "active_tray_id": "tray-b",
+    "accepted_tray_id": null,
+    "draws_used": 1,
+    "preferences": {
+      "liked": ["A"],
+      "disliked": ["C"],
+      "strategy": "随便中个喜欢",
+      "tie_tolerance_pp": 0.5,
+      "stop_rules": {
+        "max_draws": 2
+      }
+    },
+    "tools": {
+      "hint_cards": 0,
+      "display_cards": 0
+    },
+    "trays": [
+      {
+        "id": "tray-a",
+        "model": {
+          "type": "unique_regular",
+          "designs": ["A", "B", "C"]
+        },
+        "boxes": [
+          {
+            "id": "1",
+            "excluded": ["C"],
+            "status": "available"
+          },
+          {
+            "id": "2",
+            "excluded": ["A"],
+            "status": "available"
+          },
+          {
+            "id": "3",
+            "excluded": [],
+            "known": "C",
+            "status": "opened"
+          }
+        ]
+      },
+      {
+        "id": "tray-b",
+        "model": {
+          "type": "unique_regular",
+          "designs": ["A", "B", "C"]
+        },
+        "boxes": [
+          {
+            "id": "1",
+            "excluded": ["C"],
+            "status": "available"
+          },
+          {
+            "id": "2",
+            "excluded": [],
+            "status": "available"
+          },
+          {
+            "id": "3",
+            "excluded": [],
+            "status": "sold_unknown"
+          }
+        ]
+      }
+    ],
+    "events": [
+      {
+        "seq": 1,
+        "type": "tray_switch",
+        "tray_id": "tray-a"
+      },
+      {
+        "seq": 2,
+        "type": "opened_result",
+        "tray_id": "tray-a",
+        "box_id": "3",
+        "design": "C"
+      },
+      {
+        "seq": 3,
+        "type": "stop_rule_override",
+        "tray_id": "tray-a",
+        "rule": "max_draws",
+        "old_value": 1,
+        "new_value": 2,
+        "reason": "首抽未命中，用户确认再抽一盒"
+      },
+      {
+        "seq": 4,
+        "type": "tray_switch",
+        "tray_id": "tray-b"
+      }
+    ],
+    "meta": {
+      "provenance": "synthetic"
+    }
+  }
+}

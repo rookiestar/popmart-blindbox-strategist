@@ -10,6 +10,10 @@
   terminal-equivalence fields; equivalent policies now prefer fewer cards.
 - Added report-level synthetic regressions around 0.063pp, 0.396pp, and
   0.589pp uplift, plus a redundant-first-card regression.
+- Added accepted-tray locking, explicit release and stop-rule override events,
+  and lock-aware session recommendations/review output.
+- Added machine-readable regular-only and assumed-hint warnings, plus explicit
+  conditional-probability metadata in every report.
 - Added a backward-compatible multi-tray session envelope with stable tray
   IDs, global tool/draw counters, and an append-only actual-event ledger.
 - Added one report-level session output that preserves independent posterior
