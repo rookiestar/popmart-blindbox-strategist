@@ -59,6 +59,18 @@ Marginals are averaged using these posterior scenario weights.
 
 Do not derive a case-level secret prior from an ambiguous “1/x” label without checking whether it is per box, per case, or a marketing simplification. When the explicitly requested replacement rule is unknown, stop the hidden branch rather than inventing a mixture or sensitivity analysis.
 
+Every report labels these numbers as conditional:
+
+- `model_summary.scope`: `regular_only` or `declared_mixture`;
+- `model_summary.probability_kind`: `conditional`;
+- `model_summary.conditional_on`: the complete-case, clue, scope/prior, and
+  relevant tool assumptions;
+- `model_warnings[].code = regular_only_scope` when hidden designs are
+  excluded.
+
+The reader-facing probability statement must say “条件概率”; decimal precision
+does not remove model uncertainty.
+
 ## 5. Preference objectives
 
 Read `references/preference-strategies.md` for user-facing selection and input.
@@ -87,6 +99,12 @@ Default mechanism:
 - the card selects uniformly from not-yet-shown labels that are not the true design;
 - the result adds one hard exclusion to the selected box;
 - the box cannot receive another user tool.
+
+The state records this as
+`model.hint_mechanism = {type: uniform_wrong_label, status: assumed}`.
+Change the status to `confirmed` only after reliable confirmation. When an
+assumed mechanism affects a card plan, the report emits the machine warning
+`hint_mechanism_assumed`; hint-card value is conditional on that mechanism.
 
 If a box has `K` currently revealable labels and the true design is among them, then for label `y`:
 
@@ -187,6 +205,8 @@ Before presenting results, verify:
 - equivalent terminal policies use fewer expected cards and report depth-two
   action identity separately from terminal equivalence;
 - no user tool is planned on a box with `tool_used: true`.
+- regular-only and assumed hint-mechanism limits appear as stable
+  machine-readable warnings, and displayed percentages are called conditional.
 
 ## 11. Unsupported or ambiguous situations
 

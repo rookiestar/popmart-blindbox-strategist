@@ -58,6 +58,9 @@ Cover every regular design. Cite current claims inline. If only QianDao is usabl
 - 整盒假设：...
 - 已售未知盒：保留为潜变量的盒号
 - 合法整盒排列：N（若为混合模型则列情景后验）
+- 概率口径：在整盒无重复、线索真实、常规款范围/声明情景成立条件下的条件概率
+- 提示机制：均匀返回未显示错误标签（假设/已确认）
+- 模型警告：`regular_only_scope` / `hint_mechanism_assumed`（适用时）
 - 关键不确定性：...
 - 隐藏款：默认未计入
 
@@ -106,6 +109,9 @@ Cover every regular design. Cite current claims inline. If only QianDao is usabl
   并列“两卡终局相对一卡终局”的增益
 ```
 
+Render `regular_only_scope` through the single hidden-design line in the
+template; do not repeat the same warning elsewhere in the user-facing reply.
+
 The “all options” tables must be complete for each top-three box. Do not show only liked and disliked subsets.
 
 ## C. Update after a hint/display result
@@ -131,6 +137,7 @@ The “all options” tables must be complete for each top-three box. Do not sho
 
 - 剩余提示卡：N
 - 剩余显示卡：M
+- 合格端锁定：未锁定 / 已锁定 tray-X；换端前需显式释放
 - 动作排名：直接抽/停止、提示卡、显示卡
 - 当前建议：...
 - 两步规划（若启用）：首步...；身份未变/已变；终局等价/不等价；
@@ -199,6 +206,7 @@ Use before committing cards or a purchase to a 3–5 minute tray:
 - 硬雷合计：...%（上限 ...%，差 ...pp）
 - 若依赖道具：用提示卡/显示卡于 X号；结果后仍可抽的概率 ...%
 - 下一端入场线：默认摇盒后，当前最佳盒需同时满足以上全部质量线
+- 若本端已接受：保持锁定；如要换端，先说明理由并记录释放
 - 下一端不保证更好；本结论未使用固定提示条数
 - 隐藏款：默认未计入
 ```
@@ -215,6 +223,9 @@ Use `references/review-and-evals.md`. The first paragraph must answer:
 - How probable was the actual result?
 
 Never use “手气差” as a substitute for the actual probability.
+
+The review must list the accepted/released tray lifecycle and every
+`stop_rule_override` with its old value, new value, and confirmed reason.
 
 ## I. Guided intake — single question
 

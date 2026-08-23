@@ -86,6 +86,8 @@ Check:
 
 - planned maximum number of draws;
 - planned tool budget;
+- accepted and released tray events;
+- every stop-rule override, including old/new values and confirmed reason;
 - whether the user changed the objective after a loss;
 - whether another draw was justified by updated information or driven by sunk cost;
 - whether the reported success/failure probability was understood.
@@ -244,6 +246,20 @@ When direct draw passes every stop rule, a card below
 nonzero fully qualifying branch remains eligible as a rescue route. Report
 primary uplift, threshold result, and expected cards used.
 
+### E20 — Accepted-tray lock and overrides
+
+An accepted tray remains active until `tray_released` records a concise
+reason. Switching without release fails closed. The complete session report
+shows the current lock, acceptance lifecycle, and every stop-rule override;
+the latest override value matches session preferences.
+
+### E21 — Conditional-probability warnings
+
+Every report exposes model scope, conditional assumptions, and hint-mechanism
+status. Regular-only analysis emits `regular_only_scope`. A card plan using an
+unconfirmed uniform wrong-label mechanism also emits
+`hint_mechanism_assumed`; confirmed mechanisms clear only that warning.
+
 ## 7. Review output template
 
 ```markdown
@@ -268,6 +284,10 @@ primary uplift, threshold result, and expected cards used.
 ## 道具使用
 
 [逐张区分 ex-ante 价值和随机结果。]
+
+## 锁定与止损线变更
+
+[列接受/释放端，以及每次 stop_rule_override 的旧值、新值和理由。]
 
 ## 真正需要更新的地方
 

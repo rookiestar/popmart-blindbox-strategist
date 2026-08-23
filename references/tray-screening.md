@@ -37,12 +37,23 @@ python3 scripts/blindbox_solver.py <state.json> \
 | `ready` | 当前最佳盒直接通过全部质量入场线 | 保留此端，执行当前最优动作 |
 | `tool_dependent` | 直接未达线，但一步道具有非零概率产生可抽分支 | 仅在愿意消耗该卡时保留，并显示达线概率 |
 | `switch` | 直接未达线，且一步规划仍选择停止 | 不用卡，换端 |
+| `accepted_review` | 已锁定端后来未达线，原建议会换端 | 先复核；确认后记录释放，再换端 |
 | `session_stop` | 已达到整轮抽盒上限 | 停止整轮；换端无效 |
 | `needs_acceptance_rules` | 没有质量入场线 | 先根据偏好补入场线，不宣称端型好坏 |
 
 `tool_dependent`不是直接合格。报告
 `one_card_action.expected_draw_probability`，不要把“存在可救分支”写成高
 成功率，也不要因卡片免费或已持有就忽略其稀缺性。
+
+## 合格端锁定
+
+用户确认保留 `ready` 端后，设置 `accepted_tray_id` 并追加
+`tray_accepted`。锁定期间继续在该端计算；换端前必须先追加带理由的
+`tray_released` 并清空锁定。
+
+若新线索或显式止损线变更使锁定端原本会进入 `switch`，报告
+`accepted_review / release_before_switch`，保留未锁定时的原建议供复核，
+不自动绕过锁定。
 
 ## 下一端入场线
 
@@ -63,6 +74,7 @@ python3 scripts/blindbox_solver.py <state.json> \
 - `直接可做 / 依赖道具 / 建议换端 / 本轮停止 / 需先设入场线`；
 - 当前最佳盒及未达线差值；
 - 若依赖道具，首张卡、目标盒和用卡后仍可抽的概率；
+- 当前合格端锁定，以及换端前是否需要显式释放；
 - 下一端的质量入场线；
 - `隐藏款：默认未计入`。
 

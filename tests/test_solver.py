@@ -59,6 +59,16 @@ def tool_planning_fixture():
     return json.loads(fixture.read_text(encoding="utf-8"))
 
 
+def session_lock_fixture():
+    fixture = (
+        MODULE_PATH.parents[1]
+        / "tests"
+        / "fixtures"
+        / "session-lock-and-warnings.json"
+    )
+    return json.loads(fixture.read_text(encoding="utf-8"))
+
+
 class SolverTests(unittest.TestCase):
     def normalized(self, state=None):
         return solver._normalize_state(state or base_state())
@@ -123,6 +133,207 @@ class SolverTests(unittest.TestCase):
         self.assertEqual(tray_c["draw_decision"]["tray_opened_count"], 0)
         self.assertFalse(tray_c["draw_decision"]["should_draw"])
         self.assertIn("达到最多 1 盒", tray_c["draw_decision"]["reasons"][0])
+
+    def test_accepted_tray_lock_reaches_the_complete_session_report(self):
+        raw = session_lock_fixture()["accepted_session"]
+        session = solver._normalize_session(raw)
+        report = solver.build_session_report(session, plan_depth=1)
+
+        self.assertEqual(session["accepted_tray_id"], "tray-a")
+        self.assertEqual(
+            report["session_summary"]["accepted_tray_id"],
+            "tray-a",
+        )
+        self.assertEqual(report["session_summary"]["lock_status"], "accepted")
+        self.assertEqual(
+            report["session_recommendation"],
+            {
+                "action": "continue_with_accepted_tray",
+                "tray_id": "tray-a",
+                "release_required_before_switch": True,
+            },
+        )
+        self.assertTrue(
+            report["tray_reports"]["tray-a"]["tray_lock"]["is_accepted"]
+        )
+        self.assertTrue(
+            report["tray_reports"]["tray-a"]["tray_lock"][
+                "currently_qualified"
+            ]
+        )
+        self.assertFalse(
+            report["tray_reports"]["tray-b"]["tray_lock"]["is_accepted"]
+        )
+        model_summary = report["tray_reports"]["tray-a"]["model_summary"]
+        self.assertEqual(model_summary["scope"], "regular_only")
+        self.assertEqual(model_summary["probability_kind"], "conditional")
+        self.assertIn("条件概率", model_summary["probability_statement"])
+        self.assertEqual(
+            model_summary["hint_mechanism"],
+            {
+                "type": "uniform_wrong_label",
+                "status": "assumed",
+            },
+        )
+        self.assertEqual(
+            {
+                warning["code"]
+                for warning in report["tray_reports"]["tray-a"][
+                    "model_warnings"
+                ]
+            },
+            {"regular_only_scope", "hint_mechanism_assumed"},
+        )
+
+    def test_accepted_tray_requires_release_before_switching(self):
+        raw = session_lock_fixture()["accepted_session"]
+        raw["events"].pop()
+        with self.assertRaisesRegex(
+            solver.StateError, "must match the tray acceptance"
+        ):
+            solver._normalize_session(raw)
+
+        raw = session_lock_fixture()["accepted_session"]
+        raw["active_tray_id"] = "tray-b"
+        raw["events"].append(
+            {"seq": 3, "type": "tray_switch", "tray_id": "tray-b"}
+        )
+        with self.assertRaisesRegex(
+            solver.StateError, "release the accepted tray"
+        ):
+            solver._normalize_session(raw)
+
+        raw = session_lock_fixture()["accepted_session"]
+        raw["accepted_tray_id"] = None
+        raw["active_tray_id"] = "tray-b"
+        raw["events"].extend(
+            [
+                {
+                    "seq": 3,
+                    "type": "tray_released",
+                    "tray_id": "tray-a",
+                    "reason": "用户确认继续比较其他端",
+                },
+                {
+                    "seq": 4,
+                    "type": "tray_switch",
+                    "tray_id": "tray-b",
+                },
+            ]
+        )
+        report = solver.build_session_report(solver._normalize_session(raw))
+
+        self.assertEqual(report["session_summary"]["lock_status"], "open")
+        self.assertEqual(
+            [
+                event["type"]
+                for event in report["session_review"][
+                    "acceptance_lifecycle"
+                ]
+            ],
+            ["tray_accepted", "tray_released"],
+        )
+        self.assertEqual(
+            report["session_recommendation"]["action"],
+            "follow_active_tray_report",
+        )
+
+    def test_locked_tray_screening_requires_release_before_switch(self):
+        raw = session_lock_fixture()["accepted_session"]
+        raw["preferences"]["stop_rules"]["min_like_any_pp"] = 80
+        raw["tools"]["hint_cards"] = 0
+        raw["events"].append(
+            {
+                "seq": 3,
+                "type": "stop_rule_override",
+                "tray_id": "tray-a",
+                "rule": "min_like_any_pp",
+                "old_value": 60,
+                "new_value": 80,
+                "reason": "用户确认提高本端最低喜欢率",
+            }
+        )
+        report = solver.build_session_report(
+            solver._normalize_session(raw),
+            screen_tray=True,
+        )
+        screening = report["tray_reports"]["tray-a"]["tray_screening"]
+
+        self.assertEqual(screening["status"], "accepted_review")
+        self.assertEqual(
+            screening["recommendation"],
+            "release_before_switch",
+        )
+        self.assertEqual(screening["unlocked_recommendation"], "switch")
+        self.assertTrue(screening["release_required_before_switch"])
+        self.assertFalse(
+            report["tray_reports"]["tray-a"]["tray_lock"][
+                "currently_qualified"
+            ]
+        )
+
+    def test_stop_rule_override_is_auditable_and_matches_final_state(self):
+        raw = session_lock_fixture()["override_session"]
+        report = solver.build_session_report(solver._normalize_session(raw))
+        ledger_event = report["actual_events"][2]
+        review_event = report["session_review"]["stop_rule_overrides"][0]
+
+        self.assertEqual(report["session_summary"]["max_draws"], 2)
+        self.assertEqual(
+            report["session_summary"]["stop_rule_override_count"],
+            1,
+        )
+        self.assertEqual(
+            (ledger_event["old_value"], ledger_event["new_value"]),
+            (1, 2),
+        )
+        self.assertEqual(review_event, ledger_event)
+        self.assertTrue(review_event["reason"])
+
+        raw = session_lock_fixture()["override_session"]
+        raw["preferences"]["stop_rules"]["max_draws"] = 3
+        with self.assertRaisesRegex(
+            solver.StateError, "must match session preferences"
+        ):
+            solver._normalize_session(raw)
+
+        raw = session_lock_fixture()["override_session"]
+        raw["events"][2]["tray_id"] = "tray-b"
+        with self.assertRaisesRegex(
+            solver.StateError, "must target the current event tray"
+        ):
+            solver._normalize_session(raw)
+
+    def test_confirmed_hint_mechanism_clears_only_its_warning(self):
+        raw = base_state()
+        raw["model"]["hint_mechanism"] = {
+            "type": "uniform_wrong_label",
+            "status": "confirmed",
+        }
+        report = solver.build_report(
+            self.normalized(raw),
+            plan_depth=1,
+        )
+
+        self.assertEqual(
+            {warning["code"] for warning in report["model_warnings"]},
+            {"regular_only_scope"},
+        )
+        self.assertEqual(
+            report["model_summary"]["hint_mechanism"]["status"],
+            "confirmed",
+        )
+
+    def test_hint_mechanism_metadata_rejects_unsupported_claims(self):
+        raw = base_state()
+        raw["model"]["hint_mechanism"] = {
+            "type": "uniform_wrong_label",
+            "status": "verified_elsewhere",
+        }
+        with self.assertRaisesRegex(
+            solver.StateError, "status must be assumed or confirmed"
+        ):
+            self.normalized(raw)
 
     def test_session_event_ledger_must_match_real_tray_state(self):
         raw = multi_tray_session()
@@ -1477,6 +1688,18 @@ class SolverTests(unittest.TestCase):
         self.assertAlmostEqual(posterior.marginals["1"]["A"], 0.45)
         self.assertAlmostEqual(posterior.marginals["1"]["B"], 0.45)
         self.assertAlmostEqual(posterior.marginals["1"]["S"], 0.10)
+        report = solver.build_report(state)
+        self.assertEqual(
+            report["model_summary"]["scope"],
+            "declared_mixture",
+        )
+        self.assertTrue(
+            report["model_summary"]["hidden_designs_included"]
+        )
+        self.assertNotIn(
+            "regular_only_scope",
+            {warning["code"] for warning in report["model_warnings"]},
+        )
         with self.assertRaises(solver.StateError):
             solver.plan_one_tool(state, posterior)
 
