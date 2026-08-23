@@ -1,8 +1,12 @@
+import contextlib
 import copy
 import importlib.util
+import io
+import json
 import math
 import pathlib
 import sys
+import tempfile
 import unittest
 
 MODULE_PATH = pathlib.Path(__file__).parents[1] / "scripts" / "blindbox_solver.py"
@@ -36,6 +40,15 @@ def base_state():
     }
 
 
+def multi_tray_session():
+    fixture = (
+        MODULE_PATH.parents[1]
+        / "examples"
+        / "synthetic-multi-tray-session.json"
+    )
+    return json.loads(fixture.read_text(encoding="utf-8"))
+
+
 class SolverTests(unittest.TestCase):
     def normalized(self, state=None):
         return solver._normalize_state(state or base_state())
@@ -57,6 +70,97 @@ class SolverTests(unittest.TestCase):
         self.assertEqual(report["model_summary"]["exact_valid_assignments"], 3)
         # Only drawable boxes appear in the ranking, but the sold box affected the count.
         self.assertEqual([r["box_id"] for r in report["ranking"]], ["1", "2"])
+
+    def test_legacy_state_normalizes_to_an_implicit_session(self):
+        session = solver._normalize_session(base_state())
+
+        self.assertTrue(session["_legacy_input"])
+        self.assertEqual(session["active_tray_id"], "tray-1")
+        self.assertEqual(list(session["_tray_states"]), ["tray-1"])
+        self.assertEqual(session["draws_used"], 0)
+
+    def test_multi_tray_report_keeps_posteriors_isolated_and_counters_global(self):
+        session = solver._normalize_session(multi_tray_session())
+        report = solver.build_session_report(session)
+
+        self.assertFalse(session["_legacy_input"])
+        self.assertEqual(report["session_summary"]["active_tray_id"], "tray-c")
+        self.assertEqual(
+            report["session_summary"]["tray_ids"],
+            ["tray-a", "tray-b", "tray-c"],
+        )
+        self.assertEqual(
+            report["session_summary"]["tools"],
+            {"hint_cards": 4, "display_cards": 1, "reveal_cards": 1},
+        )
+        self.assertEqual(report["session_summary"]["draws_used"], 1)
+        self.assertEqual(report["session_summary"]["event_count"], 5)
+        self.assertEqual(len(report["actual_events"]), 5)
+
+        tray_b = report["tray_reports"]["tray-b"]
+        tray_c = report["tray_reports"]["tray-c"]
+        tray_b_box_1 = next(
+            row for row in tray_b["ranking"] if row["box_id"] == "1"
+        )
+        tray_c_box_1 = next(
+            row for row in tray_c["ranking"] if row["box_id"] == "1"
+        )
+        self.assertNotEqual(
+            tray_b_box_1["liked_probabilities"]["A"],
+            tray_c_box_1["liked_probabilities"]["A"],
+        )
+        self.assertEqual(tray_c["draw_decision"]["opened_count"], 1)
+        self.assertEqual(tray_c["draw_decision"]["tray_opened_count"], 0)
+        self.assertFalse(tray_c["draw_decision"]["should_draw"])
+        self.assertIn("达到最多 1 盒", tray_c["draw_decision"]["reasons"][0])
+
+    def test_session_event_ledger_must_match_real_tray_state(self):
+        raw = multi_tray_session()
+        raw["events"][3]["excluded"] = "C"
+
+        with self.assertRaisesRegex(
+            solver.StateError, "hint result must match"
+        ):
+            solver._normalize_session(raw)
+
+        raw = multi_tray_session()
+        raw["events"].pop(3)
+        for seq, event in enumerate(raw["events"], start=1):
+            event["seq"] = seq
+        with self.assertRaisesRegex(
+            solver.StateError, "tool events must exactly match"
+        ):
+            solver._normalize_session(raw)
+
+    def test_multi_tray_cli_returns_one_report_with_every_tray(self):
+        with tempfile.NamedTemporaryFile(
+            mode="w+",
+            suffix=".json",
+            encoding="utf-8",
+        ) as state_file:
+            json.dump(multi_tray_session(), state_file, ensure_ascii=False)
+            state_file.flush()
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = solver.main(
+                    [state_file.name, "--plan-depth", "1", "--digits", "10"]
+                )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["session_summary"]["active_tray_id"], "tray-c")
+        self.assertEqual(
+            list(payload["tray_reports"]),
+            ["tray-a", "tray-b", "tray-c"],
+        )
+        self.assertNotIn("next_tool_plan", payload["tray_reports"]["tray-a"])
+        self.assertNotIn("next_tool_plan", payload["tray_reports"]["tray-b"])
+        self.assertEqual(
+            payload["tray_reports"]["tray-c"]["next_tool_plan"][
+                "recommended_action"
+            ]["action"],
+            "stop",
+        )
 
     def test_known_opened_item_updates_every_box(self):
         raw = base_state()

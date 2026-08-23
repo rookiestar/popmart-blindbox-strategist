@@ -1,0 +1,129 @@
+{
+  "session_schema_version": 1,
+  "series": "synthetic-multi-tray",
+  "active_tray_id": "tray-c",
+  "draws_used": 1,
+  "preferences": {
+    "liked": ["A"],
+    "disliked": ["C"],
+    "objective_mode": "risk_first",
+    "tie_tolerance_pp": 0.0,
+    "stop_rules": {
+      "max_draws": 1
+    }
+  },
+  "tools": {
+    "hint_cards": 4,
+    "display_cards": 1
+  },
+  "trays": [
+    {
+      "id": "tray-a",
+      "model": {
+        "type": "unique_regular",
+        "designs": ["A", "B", "C"]
+      },
+      "boxes": [
+        {
+          "id": "1",
+          "excluded": ["C"],
+          "status": "available"
+        },
+        {
+          "id": "2",
+          "excluded": ["A"],
+          "status": "available"
+        },
+        {
+          "id": "3",
+          "excluded": [],
+          "known": "C",
+          "status": "opened"
+        }
+      ]
+    },
+    {
+      "id": "tray-b",
+      "model": {
+        "type": "unique_regular",
+        "designs": ["A", "B", "C"]
+      },
+      "boxes": [
+        {
+          "id": "1",
+          "excluded": ["B"],
+          "status": "available",
+          "tool_used": true
+        },
+        {
+          "id": "2",
+          "excluded": ["A"],
+          "status": "available"
+        },
+        {
+          "id": "3",
+          "excluded": [],
+          "status": "sold_unknown"
+        }
+      ]
+    },
+    {
+      "id": "tray-c",
+      "model": {
+        "type": "unique_regular",
+        "designs": ["A", "B", "C"]
+      },
+      "boxes": [
+        {
+          "id": "1",
+          "excluded": ["C"],
+          "status": "available"
+        },
+        {
+          "id": "2",
+          "excluded": [],
+          "status": "available"
+        },
+        {
+          "id": "3",
+          "excluded": [],
+          "status": "sold_unknown"
+        }
+      ]
+    }
+  ],
+  "events": [
+    {
+      "seq": 1,
+      "type": "tray_switch",
+      "tray_id": "tray-a"
+    },
+    {
+      "seq": 2,
+      "type": "opened_result",
+      "tray_id": "tray-a",
+      "box_id": "3",
+      "design": "C"
+    },
+    {
+      "seq": 3,
+      "type": "tray_switch",
+      "tray_id": "tray-b"
+    },
+    {
+      "seq": 4,
+      "type": "hint_used",
+      "tray_id": "tray-b",
+      "box_id": "1",
+      "excluded": "B"
+    },
+    {
+      "seq": 5,
+      "type": "tray_switch",
+      "tray_id": "tray-c"
+    }
+  ],
+  "meta": {
+    "provenance": "synthetic"
+  }
+}

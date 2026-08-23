@@ -123,6 +123,10 @@ or confirms the Stage 0 decision contract.
 5. If one or more cells are unreadable, ask a targeted question only about those cells. Do not calculate from guessed text.
 6. Convert the session to the JSON format in `references/state-schema.md`.
    Preserve any confirmed guided state and do not ask the user to restate it.
+7. Give every tray a stable ID. On the first switch, promote the legacy
+   single-tray state to the multi-tray session envelope. Keep preferences,
+   remaining tools, and draws used at session level; keep posterior evidence
+   inside its originating tray.
 
 ## Stage 2.5 — Screen a timed tray
 
@@ -228,10 +232,15 @@ If the user asks whether more cards are “worth it”:
 When the user reports a hint or display result:
 
 1. Confirm whether it is actual or hypothetical from wording and context.
-2. For an actual hint, append the excluded design and set `tool_used: true`.
-3. For an actual display, set `known` to the revealed design and `tool_used: true`.
-4. For an opened purchase, set `status: opened` and retain the known design.
-5. Recompute the entire posterior and tool plan.
+2. Update only the active tray. For an actual hint, append the excluded design
+   and set `tool_used: true`; for a display, set `known` and `tool_used: true`.
+3. Decrement the session-level remaining card count and append the matching
+   actual event. For a switch, append `tray_switch` and update
+   `active_tray_id`.
+4. For an opened purchase, set `status: opened`, retain the known design,
+   increment session `draws_used`, and append `opened_result`.
+5. Recompute the active tray from session-wide tool and draw counters. Retain
+   earlier tray reports for cross-tray review.
 6. Return the same required top-three output, including full sorted option distributions.
 7. Do not let sunk tool cost influence the next choice.
 
@@ -255,6 +264,8 @@ At minimum include:
 - The screenshot exclusions were interpreted as “not”.
 - Sold unknown boxes were retained as latent positions.
 - The real state was not contaminated by a counterfactual branch.
+- Every clue, tool, and opening stayed in its stable tray; remaining tools and
+  draws used came from the session envelope.
 - No box received more than one user tool.
 - All probabilities came from the current global state.
 - A timed tray was screened by quality lines, not raw clue count; switching

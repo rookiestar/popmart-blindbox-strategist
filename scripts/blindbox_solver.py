@@ -85,6 +85,14 @@ SCORE_TIER_KEYS = (
     "hard_avoid",
 )
 
+SESSION_SCHEMA_VERSION = 1
+SESSION_EVENT_TYPES = {
+    "tray_switch",
+    "hint_used",
+    "display_used",
+    "opened_result",
+}
+
 
 @dataclass(frozen=True)
 class Scenario:
@@ -446,6 +454,235 @@ def _normalize_state(raw: Mapping[str, Any]) -> Dict[str, Any]:
     state["_union_designs"] = sorted(union_designs)
     state["_hint_labels"] = hint_labels
     return state
+
+
+def _normalize_session_event(
+    raw_event: Mapping[str, Any],
+    expected_seq: int,
+    tray_states: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, Any]:
+    if not isinstance(raw_event, Mapping):
+        raise StateError("each session event must be an object")
+    event = copy.deepcopy(dict(raw_event))
+    try:
+        seq = int(event.get("seq"))
+    except (TypeError, ValueError) as exc:
+        raise StateError("session events require integer seq values") from exc
+    if seq != expected_seq:
+        raise StateError(
+            f"session event seq must be contiguous from 1; expected {expected_seq}, got {seq}"
+        )
+    event_type = str(event.get("type", "")).strip()
+    if event_type not in SESSION_EVENT_TYPES:
+        raise StateError(
+            f"session event {seq}: unsupported type {event_type!r}; "
+            f"use one of {sorted(SESSION_EVENT_TYPES)}"
+        )
+    tray_id = str(event.get("tray_id", "")).strip()
+    if tray_id not in tray_states:
+        raise StateError(f"session event {seq}: unknown tray_id {tray_id!r}")
+    event["seq"] = seq
+    event["type"] = event_type
+    event["tray_id"] = tray_id
+
+    if event_type == "tray_switch":
+        return event
+
+    box_id = str(event.get("box_id", "")).strip()
+    boxes_by_id = {box["id"]: box for box in tray_states[tray_id]["boxes"]}
+    if box_id not in boxes_by_id:
+        raise StateError(
+            f"session event {seq}: unknown box_id {box_id!r} in tray {tray_id!r}"
+        )
+    event["box_id"] = box_id
+    box = boxes_by_id[box_id]
+
+    if event_type == "hint_used":
+        excluded = str(event.get("excluded", "")).strip()
+        if not excluded or excluded not in box["excluded"] or not box["tool_used"]:
+            raise StateError(
+                f"session event {seq}: hint result must match the tray state"
+            )
+        event["excluded"] = excluded
+    else:
+        design = str(event.get("design", "")).strip()
+        if not design or design != box["known"]:
+            raise StateError(
+                f"session event {seq}: revealed design must match the tray state"
+            )
+        event["design"] = design
+        if event_type == "display_used" and not box["tool_used"]:
+            raise StateError(
+                f"session event {seq}: display result requires tool_used=true"
+            )
+        if event_type == "opened_result" and box["status"] != "opened":
+            raise StateError(
+                f"session event {seq}: opened result requires status=opened"
+            )
+    return event
+
+
+def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
+    """Normalize legacy state or a multi-tray session envelope.
+
+    Legacy inputs become an implicit one-tray session internally while their
+    CLI report remains backward compatible.
+    """
+    if not isinstance(raw, Mapping):
+        raise StateError("input must be a JSON object")
+
+    if "trays" not in raw:
+        state = _normalize_state(raw)
+        tray_id = str(
+            (state.get("meta") or {}).get("tray_id", "tray-1")
+        ).strip() or "tray-1"
+        draws_used = sum(
+            1 for box in state["boxes"] if box["status"] == "opened"
+        )
+        state["_tray_id"] = tray_id
+        state["_session_draws_used"] = draws_used
+        return {
+            "session_schema_version": SESSION_SCHEMA_VERSION,
+            "active_tray_id": tray_id,
+            "tools": copy.deepcopy(state["tools"]),
+            "draws_used": draws_used,
+            "events": [],
+            "_legacy_input": True,
+            "_tray_states": {tray_id: state},
+        }
+
+    try:
+        version = int(raw.get("session_schema_version", SESSION_SCHEMA_VERSION))
+    except (TypeError, ValueError) as exc:
+        raise StateError("session_schema_version must be an integer") from exc
+    if version != SESSION_SCHEMA_VERSION:
+        raise StateError(
+            f"unsupported session_schema_version: {version}; "
+            f"expected {SESSION_SCHEMA_VERSION}"
+        )
+
+    raw_trays = raw.get("trays")
+    if not isinstance(raw_trays, list) or not raw_trays:
+        raise StateError("session.trays must be a non-empty list")
+    shared = {
+        key: copy.deepcopy(raw[key])
+        for key in ("series", "preferences", "tools", "market_values")
+        if key in raw
+    }
+    if "preferences" not in shared:
+        raise StateError("session.preferences must be an object")
+    if "tools" not in shared:
+        shared["tools"] = {}
+
+    tray_states: Dict[str, Dict[str, Any]] = {}
+    for raw_tray in raw_trays:
+        if not isinstance(raw_tray, Mapping):
+            raise StateError("each session tray must be an object")
+        tray = copy.deepcopy(dict(raw_tray))
+        tray_id = str(tray.pop("id", "")).strip()
+        if not tray_id:
+            raise StateError("each session tray requires a non-empty id")
+        if tray_id in tray_states:
+            raise StateError(f"duplicate tray id: {tray_id}")
+        duplicated_globals = sorted(
+            key for key in ("preferences", "tools", "market_values") if key in tray
+        )
+        if duplicated_globals:
+            raise StateError(
+                f"tray {tray_id}: keep {duplicated_globals} at session level"
+            )
+        tray_raw = copy.deepcopy(shared)
+        tray_raw.update(tray)
+        state = _normalize_state(tray_raw)
+        state["_tray_id"] = tray_id
+        tray_states[tray_id] = state
+
+    active_tray_id = str(raw.get("active_tray_id", "")).strip()
+    if active_tray_id not in tray_states:
+        raise StateError("active_tray_id must identify one session tray")
+
+    opened_total = sum(
+        1
+        for state in tray_states.values()
+        for box in state["boxes"]
+        if box["status"] == "opened"
+    )
+    try:
+        draws_used = int(raw.get("draws_used", opened_total))
+    except (TypeError, ValueError) as exc:
+        raise StateError("session.draws_used must be an integer") from exc
+    if draws_used < 0:
+        raise StateError("session.draws_used must be non-negative")
+    if draws_used != opened_total:
+        raise StateError(
+            "session.draws_used must equal the opened-box total across all trays"
+        )
+    for state in tray_states.values():
+        state["_session_draws_used"] = draws_used
+
+    raw_events = raw.get("events", [])
+    if not isinstance(raw_events, list):
+        raise StateError("session.events must be a list")
+    events = [
+        _normalize_session_event(event, index, tray_states)
+        for index, event in enumerate(raw_events, start=1)
+    ]
+    tool_event_boxes: set[Tuple[str, str]] = set()
+    opened_event_boxes: set[Tuple[str, str]] = set()
+    for event in events:
+        if event["type"] in {"hint_used", "display_used"}:
+            key = (event["tray_id"], event["box_id"])
+            if key in tool_event_boxes or key in opened_event_boxes:
+                raise StateError(
+                    "session events must record at most one tool before opening "
+                    f"box {key[1]!r} in tray {key[0]!r}"
+                )
+            tool_event_boxes.add(key)
+        elif event["type"] == "opened_result":
+            key = (event["tray_id"], event["box_id"])
+            if key in opened_event_boxes:
+                raise StateError(
+                    f"session events repeat opened_result for tray/box {key}"
+                )
+            opened_event_boxes.add(key)
+
+    state_tool_boxes = {
+        (tray_id, box["id"])
+        for tray_id, state in tray_states.items()
+        for box in state["boxes"]
+        if box["tool_used"]
+    }
+    state_opened_boxes = {
+        (tray_id, box["id"])
+        for tray_id, state in tray_states.items()
+        for box in state["boxes"]
+        if box["status"] == "opened"
+    }
+    if tool_event_boxes != state_tool_boxes:
+        raise StateError(
+            "session tool events must exactly match boxes with tool_used=true"
+        )
+    if opened_event_boxes != state_opened_boxes:
+        raise StateError(
+            "session opened_result events must exactly match opened boxes"
+        )
+
+    switches = [event for event in events if event["type"] == "tray_switch"]
+    if switches and switches[-1]["tray_id"] != active_tray_id:
+        raise StateError(
+            "active_tray_id must match the latest tray_switch event"
+        )
+
+    active_state = tray_states[active_tray_id]
+    return {
+        "session_schema_version": version,
+        "active_tray_id": active_tray_id,
+        "tools": copy.deepcopy(active_state["tools"]),
+        "draws_used": draws_used,
+        "events": events,
+        "_legacy_input": False,
+        "_tray_states": tray_states,
+    }
 
 
 def _scenario_analysis(state: Mapping[str, Any], scenario: Scenario) -> ScenarioResult:
@@ -844,7 +1081,12 @@ def _state_signature_for_posterior(state: Mapping[str, Any]) -> str:
 
 
 def _public_state_copy(state: Mapping[str, Any]) -> Dict[str, Any]:
-    return copy.deepcopy({k: v for k, v in state.items() if not k.startswith("_")})
+    public = copy.deepcopy(
+        {k: v for k, v in state.items() if not k.startswith("_")}
+    )
+    if "_session_draws_used" in state:
+        public["_session_draws_used"] = int(state["_session_draws_used"])
+    return public
 
 
 def _state_signature_for_plan(
@@ -1263,7 +1505,10 @@ def evaluate_draw_decision(
     prefs = state["preferences"]
     stop_rules = prefs["stop_rules"]
     reasons: List[str] = []
-    opened_count = sum(1 for box in state["boxes"] if box["status"] == "opened")
+    tray_opened_count = sum(
+        1 for box in state["boxes"] if box["status"] == "opened"
+    )
+    opened_count = int(state.get("_session_draws_used", tray_opened_count))
 
     max_draws = stop_rules.get("max_draws")
     if max_draws is not None and opened_count >= max_draws:
@@ -1315,6 +1560,7 @@ def evaluate_draw_decision(
         "should_draw": not reasons,
         "best_box_id": best["box_id"],
         "opened_count": opened_count,
+        "tray_opened_count": tray_opened_count,
         "stop_rules_configured": bool(stop_rules),
         "reasons": reasons,
     }
@@ -1551,6 +1797,43 @@ def build_report(
     return report
 
 
+def build_session_report(
+    session: Mapping[str, Any],
+    include_plan: bool = False,
+    plan_depth: Optional[int] = None,
+    screen_tray: bool = False,
+    beam_width: int = 3,
+) -> Dict[str, Any]:
+    """Build one reader-facing report that preserves every tray."""
+    active_tray_id = session["active_tray_id"]
+    tray_reports: Dict[str, Dict[str, Any]] = {}
+    for tray_id, state in session["_tray_states"].items():
+        is_active = tray_id == active_tray_id
+        tray_reports[tray_id] = build_report(
+            state,
+            include_plan=include_plan if is_active else False,
+            plan_depth=plan_depth if is_active else None,
+            screen_tray=screen_tray if is_active else False,
+            beam_width=beam_width,
+        )
+
+    active_state = session["_tray_states"][active_tray_id]
+    max_draws = active_state["preferences"]["stop_rules"].get("max_draws")
+    return {
+        "session_summary": {
+            "session_schema_version": session["session_schema_version"],
+            "active_tray_id": active_tray_id,
+            "tray_ids": list(session["_tray_states"]),
+            "tools": copy.deepcopy(session["tools"]),
+            "draws_used": session["draws_used"],
+            "max_draws": max_draws,
+            "event_count": len(session["events"]),
+        },
+        "tray_reports": tray_reports,
+        "actual_events": copy.deepcopy(session["events"]),
+    }
+
+
 def _round_floats(obj: Any, digits: int = 8) -> Any:
     if isinstance(obj, float):
         return round(obj, digits)
@@ -1615,6 +1898,13 @@ def _slim_report(
     report: Mapping[str, Any], top_actions: int, full_branches: bool
 ) -> Dict[str, Any]:
     """Output-layer slimming; plan_tools results themselves stay complete."""
+    if "tray_reports" in report:
+        slimmed = dict(report)
+        slimmed["tray_reports"] = {
+            tray_id: _slim_report(tray_report, top_actions, full_branches)
+            for tray_id, tray_report in report["tray_reports"].items()
+        }
+        return slimmed
     plan = report.get("next_tool_plan")
     if plan is None:
         return dict(report)
@@ -1681,16 +1971,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             raise StateError("--top-actions must be >= 0")
         if args.beam_width < 0:
             raise StateError("--beam-width must be >= 0")
-        state = _normalize_state(_read_json(args.state))
+        session = _normalize_session(_read_json(args.state))
         if args.plan_one and args.plan_depth not in {None, 1}:
             raise StateError("--plan-one cannot be combined with --plan-depth 2")
         requested_depth = 1 if args.plan_one else args.plan_depth
-        report = build_report(
-            state,
-            plan_depth=requested_depth,
-            screen_tray=args.screen_tray,
-            beam_width=args.beam_width,
-        )
+        if session["_legacy_input"]:
+            state = session["_tray_states"][session["active_tray_id"]]
+            report = build_report(
+                state,
+                plan_depth=requested_depth,
+                screen_tray=args.screen_tray,
+                beam_width=args.beam_width,
+            )
+        else:
+            report = build_session_report(
+                session,
+                plan_depth=requested_depth,
+                screen_tray=args.screen_tray,
+                beam_width=args.beam_width,
+            )
         report = _slim_report(report, args.top_actions, args.full_branches)
     except (OSError, json.JSONDecodeError, StateError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False, indent=2), file=sys.stderr)
