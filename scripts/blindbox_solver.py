@@ -1882,6 +1882,35 @@ def evaluate_draw_decision(
     }
 
 
+def _report_stop_rule_checks(
+    state: Mapping[str, Any], best: Mapping[str, Any]
+) -> List[Dict[str, Any]]:
+    """Expose every configured draw boundary in one machine-checkable shape."""
+    prefs = state["preferences"]
+    stop_rules = prefs["stop_rules"]
+    checks = _tray_acceptance_profile(state, best)
+    max_draws = stop_rules.get("max_draws")
+    if max_draws is not None:
+        tray_opened_count = sum(
+            1 for box in state["boxes"] if box["status"] == "opened"
+        )
+        opened_count = int(
+            state.get("_session_draws_used", tray_opened_count)
+        )
+        checks.append(
+            {
+                "rule": "max_draws",
+                "operator": "<",
+                "threshold": int(max_draws),
+                "actual": opened_count,
+                "margin": int(max_draws) - opened_count,
+                "unit": "count",
+                "passed": opened_count < int(max_draws),
+            }
+        )
+    return checks
+
+
 def _tray_acceptance_profile(
     state: Mapping[str, Any], best: Mapping[str, Any]
 ) -> List[Dict[str, Any]]:
@@ -2124,6 +2153,7 @@ def build_report(
     )
     model_summary: Dict[str, Any] = {
         "type": state["model"].get("type", "unique_regular"),
+        "designs": list(state["_union_designs"]),
         "exact_valid_assignments": posterior.exact_valid_assignments,
         "scenario_posteriors": posterior.scenario_posteriors,
         "scenario_valid_assignments": {
@@ -2147,16 +2177,22 @@ def build_report(
                 "补全 scores 或设置 score_default 可消除该警告。"
             )
 
+    draw_decision = evaluate_draw_decision(state, all_box_rows[0])
     report = {
         "series": state.get("series"),
         "objective_mode": state["preferences"]["objective_mode"],
         "strategy_name": state["preferences"]["strategy"],
         "strategy_rule": STRATEGY_RULES[state["preferences"]["objective_mode"]],
+        "ranking_policy": {
+            "tie_tolerance_pp": state["preferences"]["tie_tolerance_pp"],
+            "hard_avoid_max_pp": state["preferences"]["hard_avoid_max_pp"],
+        },
         "preference_summary": {
             "liked": state["preferences"]["liked"],
             "disliked": state["preferences"]["disliked"],
             "hard_avoid": state["preferences"]["hard_avoid"],
             "score_tiers": state["preferences"]["score_tiers"],
+            "scores": state["preferences"]["scores"],
             "sources": state["preferences"]["preference_sources"],
         },
         "tool_policy": {
@@ -2166,7 +2202,12 @@ def build_report(
         "model_summary": model_summary,
         "ranking": all_box_rows,
         "top_3": [row["box_id"] for row in all_box_rows[:3]],
-        "draw_decision": evaluate_draw_decision(state, all_box_rows[0]),
+        "stop_rules": copy.deepcopy(state["preferences"]["stop_rules"]),
+        "stop_rule_checks": _report_stop_rule_checks(
+            state,
+            all_box_rows[0],
+        ),
+        "draw_decision": draw_decision,
         "model_warnings": model_warnings,
     }
     if warnings:
@@ -2335,6 +2376,966 @@ def build_session_report(
     }
 
 
+REPORT_RULE_LABELS = {
+    "min_like_any_pp": "喜欢款至少",
+    "min_favorite_any_pp": "最爱款至少",
+    "max_dislike_any_pp": "不喜欢款不超过",
+    "max_hard_avoid_pp": "硬雷不超过",
+    "min_expected_score": "期望评分至少",
+    "max_draws": "最多抽盒数",
+    "hard_avoid_max_pp": "策略硬雷上限",
+}
+
+
+def _active_user_report(
+    report: Mapping[str, Any],
+) -> Tuple[Mapping[str, Any], Optional[str]]:
+    """Resolve the active tray without letting callers silently pick a tray."""
+    if "tray_reports" not in report:
+        return report, None
+    summary = report.get("session_summary")
+    tray_reports = report.get("tray_reports")
+    if not isinstance(summary, Mapping) or not isinstance(
+        tray_reports, Mapping
+    ):
+        raise StateError(
+            "user report validation failed: session report is incomplete"
+        )
+    active_tray_id = summary.get("active_tray_id")
+    if active_tray_id not in tray_reports:
+        raise StateError(
+            "user report validation failed: active tray is missing"
+        )
+    recommendation = report.get("session_recommendation")
+    if (
+        not isinstance(recommendation, Mapping)
+        or recommendation.get("tray_id") != active_tray_id
+    ):
+        raise StateError(
+            "user report validation failed: session action targets the wrong tray"
+        )
+    return tray_reports[active_tray_id], str(active_tray_id)
+
+
+def _action_identity(action: Mapping[str, Any]) -> Tuple[Any, Any, Any]:
+    return action.get("tool"), action.get("action"), action.get("box_id")
+
+
+def _numbers_match(a: Any, b: Any, *, tolerance: float = 1e-12) -> bool:
+    try:
+        return math.isclose(
+            float(a),
+            float(b),
+            rel_tol=0.0,
+            abs_tol=tolerance,
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def validate_user_report(
+    report: Mapping[str, Any],
+    *,
+    screen_tray: bool = False,
+) -> None:
+    """Fail closed when a reader-facing report is incomplete or inconsistent."""
+    active, _ = _active_user_report(report)
+    errors: List[str] = []
+
+    if screen_tray:
+        screening = active.get("tray_screening")
+        if not isinstance(screening, Mapping):
+            errors.append("screening payload is missing")
+        else:
+            for key in (
+                "status",
+                "recommendation",
+                "direct_draw_decision",
+                "acceptance_profile",
+                "one_card_action",
+            ):
+                if key not in screening:
+                    errors.append(f"screening field {key} is missing")
+            profile = screening.get("acceptance_profile")
+            if not isinstance(profile, list):
+                errors.append("screening acceptance lines are missing")
+            else:
+                for check in profile:
+                    if not isinstance(check, Mapping) or not {
+                        "rule",
+                        "threshold",
+                        "actual",
+                        "passed",
+                    }.issubset(check):
+                        errors.append("screening acceptance line is incomplete")
+            action = screening.get("one_card_action")
+            if not isinstance(action, Mapping) or not {
+                "tool",
+                "action",
+                "box_id",
+            }.issubset(action):
+                errors.append("screening action is incomplete")
+        model_summary = active.get("model_summary")
+        if not isinstance(model_summary, Mapping) or not model_summary.get(
+            "probability_statement"
+        ):
+            errors.append("model probability statement is missing")
+        if errors:
+            raise StateError(
+                "user report validation failed: " + "; ".join(errors)
+            )
+        return
+
+    for key in (
+        "strategy_name",
+        "strategy_rule",
+        "ranking",
+        "top_3",
+        "stop_rules",
+        "stop_rule_checks",
+        "draw_decision",
+        "next_tool_plan",
+        "model_summary",
+        "model_warnings",
+    ):
+        if key not in active:
+            errors.append(f"required field {key} is missing")
+    if errors:
+        raise StateError(
+            "user report validation failed: " + "; ".join(errors)
+        )
+
+    objective_mode = active.get("objective_mode")
+    if (
+        objective_mode not in STRATEGY_NAMES
+        or active.get("strategy_name") != STRATEGY_NAMES[objective_mode]
+        or active.get("strategy_rule") != STRATEGY_RULES[objective_mode]
+    ):
+        errors.append("strategy contract is inconsistent")
+
+    model_summary = active["model_summary"]
+    designs = (
+        model_summary.get("designs")
+        if isinstance(model_summary, Mapping)
+        else None
+    )
+    if (
+        not isinstance(designs, list)
+        or not designs
+        or len(designs) != len(set(designs))
+    ):
+        errors.append("model design list is incomplete")
+        designs = []
+    if not isinstance(model_summary, Mapping) or not model_summary.get(
+        "probability_statement"
+    ):
+        errors.append("model probability statement is missing")
+    if not isinstance(active["model_warnings"], list):
+        errors.append("model warnings are malformed")
+
+    ranking = active["ranking"]
+    top_3 = active["top_3"]
+    if not isinstance(ranking, list) or not ranking:
+        errors.append("ranking is empty")
+        ranking = []
+    expected_top = [
+        row.get("box_id")
+        for row in ranking[:3]
+        if isinstance(row, Mapping)
+    ]
+    if not isinstance(top_3, list) or top_3 != expected_top:
+        errors.append("top_3 does not match ranking")
+
+    design_set = set(designs)
+    for row in ranking[:3]:
+        if not isinstance(row, Mapping):
+            errors.append("ranking row is malformed")
+            continue
+        box_id = row.get("box_id")
+        if row.get("status") not in DRAWABLE_STATUSES:
+            errors.append(f"box {box_id} is not drawable")
+        explicit = row.get("explicitly_excluded")
+        options = row.get("remaining_options_desc")
+        if not isinstance(explicit, list) or not isinstance(options, list):
+            errors.append(f"option coverage for box {box_id} is missing")
+            continue
+        explicit_designs = set(explicit) & design_set
+        option_designs: set[str] = set()
+        probabilities_by_design: Dict[str, float] = {}
+        probability_sum = 0.0
+        for option in options:
+            if not isinstance(option, Mapping):
+                errors.append(f"option coverage for box {box_id} is malformed")
+                continue
+            design = option.get("design")
+            if design in option_designs:
+                errors.append(f"option coverage for box {box_id} has duplicates")
+            option_designs.add(design)
+            try:
+                probability = float(option.get("probability"))
+            except (TypeError, ValueError):
+                errors.append(
+                    f"probability for box {box_id}/{design} is invalid"
+                )
+                continue
+            if not math.isfinite(probability) or not -1e-12 <= probability <= 1 + 1e-12:
+                errors.append(
+                    f"probability for box {box_id}/{design} is out of range"
+                )
+            if isinstance(design, str):
+                probabilities_by_design[design] = probability
+            probability_sum += probability
+            expected_global_zero = probability == 0.0
+            if bool(option.get("globally_impossible")) != expected_global_zero:
+                errors.append(
+                    f"global-zero marker for box {box_id}/{design} is inconsistent"
+                )
+        expected_options = design_set - explicit_designs
+        if option_designs != expected_options:
+            errors.append(f"option coverage mismatch for box {box_id}")
+        if option_designs & explicit_designs:
+            errors.append(
+                f"explicit exclusions overlap options for box {box_id}"
+            )
+        preference_summary = active.get("preference_summary")
+        if not isinstance(preference_summary, Mapping):
+            errors.append("preference summary is malformed")
+        else:
+            aggregate_specs = (
+                ("liked", "p_like_any", "liked_probabilities"),
+                ("disliked", "p_dislike_any", "disliked_probabilities"),
+                ("hard_avoid", "p_hard_avoid", "hard_avoid_probabilities"),
+            )
+            score_tiers = preference_summary.get("score_tiers")
+            favorite = (
+                score_tiers.get("favorite", [])
+                if isinstance(score_tiers, Mapping)
+                else []
+            )
+            for labels_key, aggregate_key, detail_key in aggregate_specs:
+                labels = preference_summary.get(labels_key)
+                details = row.get(detail_key)
+                if not isinstance(labels, list) or not isinstance(
+                    details, Mapping
+                ):
+                    errors.append(
+                        f"preference probabilities for box {box_id} are malformed"
+                    )
+                    continue
+                expected_details = {
+                    design: probabilities_by_design.get(design, 0.0)
+                    for design in labels
+                }
+                if set(details) != set(expected_details) or any(
+                    not _numbers_match(
+                        details.get(design),
+                        probability,
+                    )
+                    for design, probability in expected_details.items()
+                ):
+                    errors.append(
+                        f"preference probabilities for box {box_id} are inconsistent"
+                    )
+                expected_aggregate = sum(expected_details.values())
+                if not _numbers_match(
+                    row.get(aggregate_key),
+                    expected_aggregate,
+                ):
+                    errors.append(
+                        f"summary probability for box {box_id}/{aggregate_key} "
+                        "is inconsistent"
+                    )
+            expected_favorite_details = {
+                design: probabilities_by_design.get(design, 0.0)
+                for design in favorite
+            }
+            favorite_details = row.get("favorite_probabilities")
+            if not isinstance(favorite_details, Mapping) or set(
+                favorite_details
+            ) != set(expected_favorite_details) or any(
+                not _numbers_match(
+                    favorite_details.get(design),
+                    probability,
+                )
+                for design, probability in expected_favorite_details.items()
+            ):
+                errors.append(
+                    f"favorite probabilities for box {box_id} are inconsistent"
+                )
+            if not _numbers_match(
+                row.get("p_favorite_any"),
+                sum(expected_favorite_details.values()),
+            ):
+                errors.append(
+                    f"summary probability for box {box_id}/p_favorite_any "
+                    "is inconsistent"
+                )
+            scores = preference_summary.get("scores")
+            if isinstance(scores, Mapping) and scores:
+                expected_score = sum(
+                    probabilities_by_design.get(design, 0.0)
+                    * float(score)
+                    for design, score in scores.items()
+                )
+                if row.get("expected_score") is None or not _numbers_match(
+                    row["expected_score"],
+                    expected_score,
+                ):
+                    errors.append(
+                        f"expected score for box {box_id} is inconsistent"
+                    )
+            elif row.get("expected_score") is not None:
+                errors.append(
+                    f"expected score for box {box_id} has no score model"
+                )
+        if not math.isclose(
+            probability_sum,
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ):
+            errors.append(
+                f"probability sum for box {box_id} is {probability_sum:.12f}"
+            )
+        try:
+            reported_sum = float(row["remaining_options_probability_sum"])
+        except (KeyError, TypeError, ValueError):
+            errors.append(f"reported probability sum for box {box_id} is missing")
+        else:
+            if not math.isclose(
+                reported_sum,
+                probability_sum,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            ):
+                errors.append(
+                    f"reported probability sum for box {box_id} is inconsistent"
+                )
+
+    draw_decision = active["draw_decision"]
+    if not isinstance(draw_decision, Mapping):
+        errors.append("draw decision is malformed")
+        draw_decision = {}
+    elif ranking and draw_decision.get("best_box_id") != ranking[0].get(
+        "box_id"
+    ):
+        errors.append("draw decision targets the wrong box")
+
+    stop_rules = active["stop_rules"]
+    checks = active["stop_rule_checks"]
+    if not isinstance(stop_rules, Mapping) or not isinstance(checks, list):
+        errors.append("stop lines are malformed")
+        stop_rules = {}
+        checks = []
+    expected_check_rules = set(stop_rules)
+    ranking_policy = active.get("ranking_policy")
+    if (
+        active.get("objective_mode") == "guardrail"
+        and isinstance(ranking_policy, Mapping)
+        and ranking_policy.get("hard_avoid_max_pp") is not None
+    ):
+        expected_check_rules.add("hard_avoid_max_pp")
+    actual_check_rules = [
+        check.get("rule") for check in checks if isinstance(check, Mapping)
+    ]
+    if set(actual_check_rules) != expected_check_rules or len(
+        actual_check_rules
+    ) != len(set(actual_check_rules)):
+        errors.append("stop line coverage does not match configured rules")
+
+    best = ranking[0] if ranking else {}
+    expected_actuals = {
+        "min_like_any_pp": 100.0 * float(best.get("p_like_any", 0.0)),
+        "min_favorite_any_pp": 100.0
+        * float(best.get("p_favorite_any", 0.0)),
+        "max_dislike_any_pp": 100.0
+        * float(best.get("p_dislike_any", 0.0)),
+        "max_hard_avoid_pp": 100.0
+        * float(best.get("p_hard_avoid", 0.0)),
+        "hard_avoid_max_pp": 100.0
+        * float(best.get("p_hard_avoid", 0.0)),
+        "min_expected_score": best.get("expected_score"),
+        "max_draws": draw_decision.get("opened_count"),
+    }
+    expected_thresholds = dict(stop_rules)
+    if "hard_avoid_max_pp" in expected_check_rules:
+        expected_thresholds["hard_avoid_max_pp"] = ranking_policy[
+            "hard_avoid_max_pp"
+        ]
+    expected_operators = {
+        "min_like_any_pp": ">=",
+        "min_favorite_any_pp": ">=",
+        "max_dislike_any_pp": "<=",
+        "max_hard_avoid_pp": "<=",
+        "min_expected_score": ">=",
+        "max_draws": "<",
+        "hard_avoid_max_pp": "<=",
+    }
+    for check in checks:
+        if not isinstance(check, Mapping):
+            errors.append("stop line is malformed")
+            continue
+        rule = check.get("rule")
+        if rule not in expected_actuals:
+            errors.append(f"stop line {rule} is unsupported")
+            continue
+        expected_actual = expected_actuals[rule]
+        try:
+            actual = float(check.get("actual"))
+            threshold = float(check.get("threshold"))
+        except (TypeError, ValueError):
+            errors.append(f"stop line {rule} has invalid values")
+            continue
+        if expected_actual is None or not math.isclose(
+            actual,
+            float(expected_actual),
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ):
+            errors.append(f"stop line {rule} uses the wrong metric")
+        operator = check.get("operator")
+        if not math.isclose(
+            threshold,
+            float(expected_thresholds[rule]),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            errors.append(f"stop line {rule} uses the wrong threshold")
+        if operator != expected_operators[rule]:
+            errors.append(f"stop line {rule} uses the wrong operator")
+        expected_pass = {
+            ">=": actual >= threshold,
+            "<=": actual <= threshold,
+            "<": actual < threshold,
+        }.get(operator)
+        if expected_pass is None or bool(check.get("passed")) != expected_pass:
+            errors.append(f"stop line {rule} has an inconsistent result")
+
+    should_draw = bool(draw_decision.get("should_draw"))
+    if should_draw != all(bool(check.get("passed")) for check in checks):
+        errors.append("draw decision contradicts stop lines")
+    reasons = draw_decision.get("reasons")
+    if not isinstance(reasons, list) or (should_draw and reasons) or (
+        not should_draw and not reasons
+    ):
+        errors.append("draw decision reasons are inconsistent")
+
+    plan = active["next_tool_plan"]
+    if not isinstance(plan, Mapping):
+        errors.append("action plan is malformed")
+    else:
+        recommended = plan.get("recommended_action")
+        action_ranking = plan.get("action_ranking")
+        if not isinstance(recommended, Mapping) or not isinstance(
+            action_ranking, list
+        ) or not action_ranking or not isinstance(action_ranking[0], Mapping):
+            errors.append("action plan is incomplete")
+        else:
+            if _action_identity(recommended) != _action_identity(
+                action_ranking[0]
+            ):
+                errors.append("action ranking contradicts recommended action")
+            tool, action, box_id = _action_identity(recommended)
+            ranked_box_ids = {
+                row.get("box_id")
+                for row in ranking
+                if isinstance(row, Mapping)
+            }
+            if tool == "none" and action == "direct_draw":
+                if not should_draw or box_id != draw_decision.get(
+                    "best_box_id"
+                ):
+                    errors.append("action contradicts draw decision")
+            elif tool == "none" and action == "stop":
+                if should_draw or box_id is not None:
+                    errors.append("action contradicts draw decision")
+            elif tool in {"hint", "display"} and action == "use_tool":
+                if box_id not in ranked_box_ids or float(
+                    recommended.get("expected_draw_probability", 0.0)
+                ) <= 0:
+                    errors.append("action targets an invalid tool route")
+            else:
+                errors.append("action is unsupported")
+
+    if errors:
+        raise StateError(
+            "user report validation failed: " + "; ".join(errors)
+        )
+
+
+def _markdown_cell(value: Any) -> str:
+    return str(value).replace("\n", " ").replace("|", "\\|")
+
+
+def _percent(probability: Any) -> str:
+    return f"{100.0 * float(probability):.2f}%"
+
+
+def _pp(value: Any) -> str:
+    return f"{float(value):.2f}%"
+
+
+def _without_terminal_period(text: Any) -> str:
+    return str(text).rstrip().rstrip("。.!！")
+
+
+def _strategy_comparison_sentence(report: Mapping[str, Any]) -> str:
+    ranking = report["ranking"]
+    first = ranking[0]
+    if len(ranking) == 1:
+        return (
+            f"只有 {first['box_id']} 号可选，喜欢款 "
+            f"{_percent(first['p_like_any'])}，不喜欢款 "
+            f"{_percent(first['p_dislike_any'])}。"
+        )
+    second = ranking[1]
+    mode = report["objective_mode"]
+    lower_is_better = False
+    secondary = ""
+    if mode == "risk_first":
+        label = "加权雷区风险"
+        first_value = 100.0 * float(first["disliked_weighted_loss"])
+        second_value = 100.0 * float(second["disliked_weighted_loss"])
+        suffix = "点"
+        lower_is_better = True
+        secondary = (
+            f"，不喜欢款 {_percent(first['p_dislike_any'])} vs "
+            f"{_percent(second['p_dislike_any'])}"
+        )
+    elif mode == "target_only":
+        label = "喜欢款"
+        first_value = 100.0 * float(first["p_like_any"])
+        second_value = 100.0 * float(second["p_like_any"])
+        suffix = "%"
+    elif mode == "top_target_first":
+        liked = report["preference_summary"]["liked"]
+        target = liked[0] if liked else "第一喜欢款"
+        label = target
+        first_value = 100.0 * float(
+            first["liked_probabilities"].get(target, 0.0)
+        )
+        second_value = 100.0 * float(
+            second["liked_probabilities"].get(target, 0.0)
+        )
+        suffix = "%"
+        secondary = (
+            f"，任一喜欢款 {_percent(first['p_like_any'])} vs "
+            f"{_percent(second['p_like_any'])}"
+        )
+    elif mode == "guardrail":
+        label = "期望评分"
+        first_value = float(first["expected_score"])
+        second_value = float(second["expected_score"])
+        suffix = ""
+        secondary = (
+            f"，硬雷 {_percent(first['p_hard_avoid'])} vs "
+            f"{_percent(second['p_hard_avoid'])}"
+        )
+    elif mode == "balanced":
+        label = "期望评分"
+        if first.get("expected_score") is None:
+            first_value = float(first["liked_weighted_score"]) - float(
+                first["disliked_weighted_loss"]
+            )
+            second_value = float(second["liked_weighted_score"]) - float(
+                second["disliked_weighted_loss"]
+            )
+        else:
+            first_value = float(first["expected_score"])
+            second_value = float(second["expected_score"])
+        suffix = ""
+    else:
+        label = "预期二手价值"
+        first_value = float(first["resale_ev"])
+        second_value = float(second["resale_ev"])
+        suffix = ""
+
+    delta = abs(first_value - second_value)
+    favorable = (
+        first_value < second_value
+        if lower_is_better
+        else first_value > second_value
+    )
+    if math.isclose(first_value, second_value, abs_tol=1e-12):
+        comparison = "持平，由后续指标破平"
+    elif favorable:
+        direction = "低" if lower_is_better else "高"
+        comparison = f"首选{direction} {delta:.2f}{suffix}"
+    else:
+        tolerance = float(
+            report.get("ranking_policy", {}).get("tie_tolerance_pp", 0.0)
+        )
+        comparison = (
+            f"相差 {delta:.2f}{suffix}，处于 {tolerance:.2f} 点排序容差后"
+            "由后续指标胜出"
+        )
+    return (
+        f"首选 {first['box_id']} 号对次优 {second['box_id']} 号："
+        f"{label} {first_value:.2f}{suffix} vs "
+        f"{second_value:.2f}{suffix}{secondary}，{comparison}。"
+    )
+
+
+def _tool_name(tool: Any) -> str:
+    return {"hint": "提示卡", "display": "显示卡"}.get(str(tool), "卡片")
+
+
+def _action_sentence(report: Mapping[str, Any]) -> str:
+    decision = report["draw_decision"]
+    plan = report["next_tool_plan"]
+    action = plan["recommended_action"]
+    tool = action["tool"]
+    if tool in {"hint", "display"}:
+        direct = "直接抽已过线" if decision["should_draw"] else "直接抽未过线"
+        if action.get("tool_gate_reason") == "rescue_route":
+            detail = (
+                f"该路线约有 "
+                f"{100.0 * float(action['expected_draw_probability']):.2f}% "
+                "结果可过线"
+            )
+        else:
+            detail = (
+                f"主指标提升 {float(action.get('primary_uplift_pp', 0.0)):.2f} "
+                f"个百分点，门槛 "
+                f"{float(plan.get('min_tool_uplift_pp', 0.0)):.2f} 个百分点"
+            )
+        return (
+            f"{direct}；对 {action['box_id']} 号使用{_tool_name(tool)}后"
+            f"{detail}，因此先用卡。"
+        )
+    if action["action"] == "stop":
+        reasons = "；".join(decision["reasons"])
+        has_card_routes = any(
+            candidate.get("tool") != "none"
+            for candidate in plan["action_ranking"]
+        )
+        card_reason = (
+            "卡片规划也没有合格分支"
+            if has_card_routes
+            else "当前没有可用卡"
+        )
+        return f"直接抽未通过停止线：{reasons}；{card_reason}，因此停止。"
+
+    card_actions = [
+        candidate
+        for candidate in plan["action_ranking"]
+        if candidate.get("tool") != "none"
+    ]
+    if not card_actions:
+        return "直接抽已通过全部停止线，且当前没有可用卡，因此直接抽。"
+    best_uplift = max(
+        float(candidate.get("primary_uplift_pp", 0.0))
+        for candidate in card_actions
+    )
+    threshold = float(plan.get("min_tool_uplift_pp", 0.0))
+    if best_uplift + 1e-12 < threshold:
+        return (
+            f"直接抽已通过全部停止线；卡片最高主指标提升 "
+            f"{best_uplift:.2f} 个百分点，低于 {threshold:.2f} "
+            "个百分点门槛，因此不用卡。"
+        )
+    return (
+        "直接抽已通过全部停止线；比较全部卡片动作后无卡方案仍最优，"
+        "因此不用卡。"
+    )
+
+
+def _conclusion_and_next_action(
+    report: Mapping[str, Any],
+) -> Tuple[str, str]:
+    action = report["next_tool_plan"]["recommended_action"]
+    if action["tool"] in {"hint", "display"}:
+        tool = _tool_name(action["tool"])
+        conclusion = f"建议先对 {action['box_id']} 号使用{tool}。"
+        next_action = (
+            f"对 {action['box_id']} 号使用{tool}；拿到真实结果后更新状态并"
+            "重新生成完整报告，再决定抽哪盒。"
+        )
+        return conclusion, next_action
+    if action["action"] == "direct_draw":
+        box_id = action["box_id"]
+        return (
+            f"建议抽 {box_id} 号。",
+            f"抽 {box_id} 号；开盒后记录结果，再判断是否继续。",
+        )
+    return "建议停止，不抽。", "停止本轮；只有确认修改停止线后才重新计算。"
+
+
+def _render_top_summary(report: Mapping[str, Any]) -> List[str]:
+    lines = [
+        "| 排名 | 盒号 | 喜欢款 | 最爱款 | 不喜欢款 | 硬雷 | 期望评分 |",
+        "|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for rank, row in enumerate(report["ranking"][:3], start=1):
+        expected_score = row.get("expected_score")
+        score_text = (
+            "—" if expected_score is None else f"{float(expected_score):.2f}"
+        )
+        lines.append(
+            f"| {rank} | {row['box_id']}号 | "
+            f"{_percent(row['p_like_any'])} | "
+            f"{_percent(row['p_favorite_any'])} | "
+            f"{_percent(row['p_dislike_any'])} | "
+            f"{_percent(row['p_hard_avoid'])} | {score_text} |"
+        )
+    return lines
+
+
+def _render_probability_matrix(report: Mapping[str, Any]) -> List[str]:
+    candidates = report["ranking"][:3]
+    header = "| 款式 | " + " | ".join(
+        f"{_markdown_cell(row['box_id'])}号" for row in candidates
+    ) + " |"
+    divider = "|---|" + "---:|" * len(candidates)
+    by_box: Dict[str, Dict[str, Mapping[str, Any]]] = {}
+    excluded: Dict[str, set[str]] = {}
+    for row in candidates:
+        box_id = str(row["box_id"])
+        by_box[box_id] = {
+            str(option["design"]): option
+            for option in row["remaining_options_desc"]
+        }
+        excluded[box_id] = set(row["explicitly_excluded"])
+
+    lines = [header, divider]
+    for design in report["model_summary"]["designs"]:
+        cells = [_markdown_cell(design)]
+        for row in candidates:
+            box_id = str(row["box_id"])
+            if design in excluded[box_id]:
+                cells.append("已排除")
+                continue
+            option = by_box[box_id][design]
+            if option["globally_impossible"]:
+                cells.append("0.00%（全局约束）")
+            else:
+                cells.append(_percent(option["probability"]))
+        lines.append("| " + " | ".join(cells) + " |")
+    sums = "；".join(
+        f"{row['box_id']}号 "
+        f"{100.0 * float(row['remaining_options_probability_sum']):.6f}%"
+        for row in candidates
+    )
+    lines.extend(
+        [
+            "",
+            f"未舍入校验：{sums}；显示值可能有舍入差。",
+        ]
+    )
+    return lines
+
+
+def _render_stop_lines(checks: Sequence[Mapping[str, Any]]) -> List[str]:
+    if not checks:
+        return ["未配置停止线；当前只按策略排序。"]
+    lines = [
+        "| 规则 | 当前值 | 要求 | 结果 |",
+        "|---|---:|---:|---|",
+    ]
+    for check in checks:
+        unit = check["unit"]
+        if unit == "pp":
+            actual = _pp(check["actual"])
+            threshold = f"{check['operator']} {_pp(check['threshold'])}"
+        elif unit == "count":
+            actual = f"{int(check['actual'])}盒"
+            threshold = (
+                f"{check['operator']} {int(check['threshold'])}盒"
+            )
+        else:
+            actual = f"{float(check['actual']):.2f}"
+            threshold = (
+                f"{check['operator']} {float(check['threshold']):.2f}"
+            )
+        operator = threshold.replace(">=", "≥").replace("<=", "≤")
+        lines.append(
+            f"| {REPORT_RULE_LABELS.get(check['rule'], check['rule'])} | "
+            f"{actual} | {operator} | "
+            f"{'通过' if check['passed'] else '未通过'} |"
+        )
+    return lines
+
+
+def _render_model_notes(report: Mapping[str, Any]) -> List[str]:
+    model = report["model_summary"]
+    lines = [f"- {model['probability_statement']}"]
+    assignments = model.get("exact_valid_assignments")
+    if assignments is not None:
+        lines.append(f"- 有效整盒分配：{int(assignments):,}。")
+    seen: set[str] = set()
+    for warning in report.get("model_warnings", []):
+        message = str(warning.get("message", "")).strip()
+        if message and message not in seen:
+            lines.append(f"- {message}")
+            seen.add(message)
+    for warning in report.get("warnings", []):
+        message = str(warning).strip()
+        if message and message not in seen:
+            lines.append(f"- {message}")
+            seen.add(message)
+    return lines
+
+
+def _render_rule_overrides(report: Mapping[str, Any]) -> List[str]:
+    review = report.get("session_review")
+    if not isinstance(review, Mapping):
+        return []
+    overrides = review.get("stop_rule_overrides")
+    if not isinstance(overrides, list) or not overrides:
+        return []
+    lines = ["### 已确认变更", ""]
+    for event in overrides:
+        if not isinstance(event, Mapping):
+            continue
+        rule = str(event.get("rule"))
+        label = REPORT_RULE_LABELS.get(rule, rule)
+        old_value = event.get("old_value")
+        new_value = event.get("new_value")
+        if rule.endswith("_pp"):
+            old_text = "未配置" if old_value is None else _pp(old_value)
+            new_text = "未配置" if new_value is None else _pp(new_value)
+        elif rule == "max_draws":
+            old_text = (
+                "未配置" if old_value is None else f"{int(old_value)}盒"
+            )
+            new_text = (
+                "未配置" if new_value is None else f"{int(new_value)}盒"
+            )
+        else:
+            old_text = "未配置" if old_value is None else str(old_value)
+            new_text = "未配置" if new_value is None else str(new_value)
+        reason = _markdown_cell(event.get("reason", ""))
+        lines.append(
+            f"- {label}：{old_text} → {new_text}（{reason}）。"
+        )
+    return lines if len(lines) > 2 else []
+
+
+def _render_screening_markdown(
+    report: Mapping[str, Any],
+    tray_id: Optional[str],
+) -> str:
+    screening = report["tray_screening"]
+    status = screening["status"]
+    conclusions = {
+        "ready": "建议保留本端，并进入正式决策。",
+        "tool_dependent": "本端仅在按计划用卡时值得保留。",
+        "switch": "建议换端。",
+        "session_stop": "已触发全局抽数上限，建议停止。",
+        "needs_acceptance_rules": "先补充质量线，再判断是否保留本端。",
+        "accepted_review": "当前端已锁定；若要换端，先确认释放原因。",
+    }
+    recommendation = screening["recommendation"]
+    if recommendation == "release_before_switch":
+        conclusion = "当前端已锁定；若要换端，先确认释放原因。"
+    else:
+        conclusion = conclusions.get(status, f"当前状态：{status}。")
+    lines = [
+        f"# {_markdown_cell(report.get('series') or '盲盒')}｜端筛选快报",
+        "",
+    ]
+    if tray_id is not None:
+        lines.extend([f"当前端：{_markdown_cell(tray_id)}", ""])
+    lines.extend(["## 结论", "", conclusion, "", "## 质量线", ""])
+    lines.extend(_render_stop_lines(screening["acceptance_profile"]))
+    action = screening["one_card_action"]
+    if recommendation == "keep":
+        next_action = "保留本端，并生成完整决策报告。"
+    elif recommendation == "keep_if_using_tool":
+        next_action = (
+            f"对 {action['box_id']} 号使用{_tool_name(action['tool'])}；"
+            "按真实结果重算后再决定。"
+        )
+    elif recommendation == "release_before_switch":
+        next_action = "先确认释放原因并记录，再换端。"
+    elif recommendation == "switch":
+        next_action = "换端；新端不保证更优，按同一质量线重新筛选。"
+    elif recommendation == "configure_rules":
+        next_action = "补充至少一条喜欢、不喜欢、硬雷或评分质量线。"
+    else:
+        reasons = screening["direct_draw_decision"].get("reasons", [])
+        next_action = "停止本轮"
+        if reasons:
+            next_action += "：" + "；".join(reasons)
+        next_action += "。"
+    lines.extend(
+        [
+            "",
+            "## 下一步",
+            "",
+            next_action,
+            "",
+            "## 模型口径",
+            "",
+            f"- {report['model_summary']['probability_statement']}",
+        ]
+    )
+    for warning in report.get("model_warnings", []):
+        lines.append(f"- {warning['message']}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_user_markdown(
+    report: Mapping[str, Any],
+    *,
+    screen_tray: bool = False,
+) -> str:
+    """Render the validated standard report; never fall back to a summary."""
+    validate_user_report(report, screen_tray=screen_tray)
+    active, tray_id = _active_user_report(report)
+    if screen_tray:
+        return _render_screening_markdown(active, tray_id)
+
+    conclusion, next_action = _conclusion_and_next_action(active)
+    strategy_sentence = (
+        f"本轮采用「{active['strategy_name']}」："
+        f"{_without_terminal_period(active['strategy_rule'])}。"
+    )
+    lines = [
+        f"# {_markdown_cell(active.get('series') or '盲盒')}｜决策报告",
+        "",
+    ]
+    if tray_id is not None:
+        lines.extend([f"当前端：{_markdown_cell(tray_id)}", ""])
+    lines.extend(
+        [
+            "## 结论",
+            "",
+            f"**{conclusion}**",
+            "",
+            "## 决策依据",
+            "",
+            f"- {strategy_sentence}",
+            f"- {_strategy_comparison_sentence(active)}",
+            f"- {_action_sentence(active)}",
+            "",
+            "## TOP 3 汇总",
+            "",
+        ]
+    )
+    lines.extend(_render_top_summary(active))
+    lines.extend(["", "## 全款概率矩阵", ""])
+    lines.extend(_render_probability_matrix(active))
+    lines.extend(["", "## 停止线", ""])
+    lines.extend(_render_stop_lines(active["stop_rule_checks"]))
+    override_lines = _render_rule_overrides(report)
+    if override_lines:
+        lines.extend(["", *override_lines])
+    lines.extend(
+        [
+            "",
+            "## 下一步",
+            "",
+            next_action,
+            "",
+            "## 模型口径",
+            "",
+        ]
+    )
+    lines.extend(_render_model_notes(active))
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _round_floats(obj: Any, digits: int = 8) -> Any:
     if isinstance(obj, float):
         return round(obj, digits)
@@ -2463,6 +3464,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "card actions. 0 disables truncation (exact but slower)."
         ),
     )
+    parser.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="json",
+        help=(
+            "Output JSON (backward-compatible default) or the validated "
+            "reader-facing Markdown report"
+        ),
+    )
     parser.add_argument("--indent", type=int, default=0)
     parser.add_argument("--digits", type=int, default=8)
     args = parser.parse_args(argv)
@@ -2476,6 +3486,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.plan_one and args.plan_depth not in {None, 1}:
             raise StateError("--plan-one cannot be combined with --plan-depth 2")
         requested_depth = 1 if args.plan_one else args.plan_depth
+        if args.format == "markdown" and requested_depth is None:
+            requested_depth = 1
         if session["_legacy_input"]:
             state = session["_tray_states"][session["active_tray_id"]]
             report = build_report(
@@ -2491,10 +3503,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 screen_tray=args.screen_tray,
                 beam_width=args.beam_width,
             )
-        report = _slim_report(report, args.top_actions, args.full_branches)
+        if args.format == "markdown":
+            markdown = render_user_markdown(
+                report,
+                screen_tray=args.screen_tray,
+            )
+        else:
+            report = _slim_report(
+                report,
+                args.top_actions,
+                args.full_branches,
+            )
     except (OSError, json.JSONDecodeError, StateError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False, indent=2), file=sys.stderr)
         return 2
+
+    if args.format == "markdown":
+        print(markdown, end="")
+        return 0
 
     print(
         json.dumps(

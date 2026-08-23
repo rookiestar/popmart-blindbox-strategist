@@ -73,6 +73,22 @@ class SolverTests(unittest.TestCase):
     def normalized(self, state=None):
         return solver._normalize_state(state or base_state())
 
+    def cli_output(self, raw, *args):
+        with tempfile.NamedTemporaryFile(
+            mode="w+",
+            suffix=".json",
+            encoding="utf-8",
+        ) as state_file:
+            json.dump(raw, state_file, ensure_ascii=False)
+            state_file.flush()
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(
+                stderr
+            ):
+                exit_code = solver.main([state_file.name, *args])
+        return exit_code, stdout.getvalue(), stderr.getvalue()
+
     def test_exact_matching_and_marginals(self):
         state = self.normalized()
         posterior = solver.analyze_posterior(state)
@@ -1802,6 +1818,324 @@ class SolverTests(unittest.TestCase):
             0.6233,
             places=4,
         )
+
+    def test_markdown_cli_delivers_the_complete_initial_report(self):
+        fixture = (
+            MODULE_PATH.parents[1]
+            / "examples"
+            / "synthetic-series-a-before-tools.json"
+        )
+        raw = json.loads(fixture.read_text(encoding="utf-8"))
+
+        exit_code, output, error = self.cli_output(
+            raw,
+            "--format",
+            "markdown",
+        )
+
+        self.assertEqual(exit_code, 0, error)
+        for heading in (
+            "## 结论",
+            "## 决策依据",
+            "## TOP 3 汇总",
+            "## 全款概率矩阵",
+            "## 停止线",
+            "## 下一步",
+            "## 模型口径",
+        ):
+            self.assertIn(heading, output)
+        explanation = output.split("## 决策依据", 1)[1].split("## TOP 3", 1)[0]
+        explanation_lines = [
+            line for line in explanation.splitlines() if line.startswith("- ")
+        ]
+        self.assertEqual(len(explanation_lines), 3)
+        self.assertIn("| 款式 | 2号 | 8号 | 12号 |", output)
+        for design in raw["model"]["designs"]:
+            self.assertIn(f"| {design} |", output)
+
+    def test_markdown_matrix_distinguishes_explicit_and_global_zeroes(self):
+        raw = base_state()
+        raw["boxes"][2].update({"status": "opened", "known": "C"})
+
+        exit_code, output, error = self.cli_output(
+            raw,
+            "--format",
+            "markdown",
+        )
+
+        self.assertEqual(exit_code, 0, error)
+        self.assertIn("| C | 已排除 | 0.00%（全局约束） |", output)
+        self.assertIn("| B | 0.00%（全局约束） | 100.00% |", output)
+
+    def test_markdown_report_remains_complete_after_a_real_hint(self):
+        fixture = (
+            MODULE_PATH.parents[1]
+            / "examples"
+            / "synthetic-series-a-after-hint.json"
+        )
+        raw = json.loads(fixture.read_text(encoding="utf-8"))
+
+        exit_code, output, error = self.cli_output(
+            raw,
+            "--format",
+            "markdown",
+        )
+
+        self.assertEqual(exit_code, 0, error)
+        self.assertIn("## 决策依据", output)
+        self.assertIn("## 全款概率矩阵", output)
+        self.assertIn("## 停止线", output)
+        for design in raw["model"]["designs"]:
+            self.assertIn(f"| {design} |", output)
+
+    def test_markdown_cli_plans_a_card_without_an_extra_plan_flag(self):
+        fixture = (
+            MODULE_PATH.parents[1]
+            / "examples"
+            / "synthetic-series-b-after-open.json"
+        )
+        raw = json.loads(fixture.read_text(encoding="utf-8"))
+
+        exit_code, output, error = self.cli_output(
+            raw,
+            "--format",
+            "markdown",
+        )
+
+        self.assertEqual(exit_code, 0, error)
+        self.assertIn("建议先对 11 号使用提示卡", output)
+        self.assertIn("主指标提升", output)
+
+    def test_markdown_report_explains_why_no_card_is_needed(self):
+        raw = json.loads(
+            (
+                MODULE_PATH.parents[1] / "examples" / "minimal-demo.json"
+            ).read_text(encoding="utf-8")
+        )
+
+        exit_code, output, error = self.cli_output(
+            raw,
+            "--format",
+            "markdown",
+        )
+
+        self.assertEqual(exit_code, 0, error)
+        self.assertIn("建议抽 1 号", output)
+        self.assertIn("不用卡", output)
+
+    def test_markdown_report_lists_every_failed_stop_line(self):
+        raw = base_state()
+        raw["preferences"]["stop_rules"] = {
+            "min_like_any_pp": 90,
+            "max_dislike_any_pp": 80,
+            "max_draws": 2,
+        }
+        raw["tools"] = {}
+
+        exit_code, output, error = self.cli_output(
+            raw,
+            "--format",
+            "markdown",
+        )
+
+        self.assertEqual(exit_code, 0, error)
+        self.assertIn("建议停止", output)
+        self.assertIn("| 喜欢款至少 | 66.67% | ≥ 90.00% | 未通过 |", output)
+        self.assertIn("| 不喜欢款不超过 | 0.00% | ≤ 80.00% | 通过 |", output)
+        self.assertIn("| 最多抽盒数 | 0盒 | < 2盒 | 通过 |", output)
+
+    def test_markdown_report_lists_every_supported_stop_rule(self):
+        raw = base_state()
+        raw["preferences"].pop("objective_mode")
+        raw["preferences"].update(
+            {
+                "strategy": "守住底线",
+                "scores": {"A": 10, "B": 0, "C": -10},
+                "hard_avoid": ["C"],
+                "hard_avoid_max_pp": 100,
+                "stop_rules": {
+                    "min_like_any_pp": 60,
+                    "min_favorite_any_pp": 60,
+                    "max_dislike_any_pp": 10,
+                    "max_hard_avoid_pp": 10,
+                    "min_expected_score": 5,
+                    "max_draws": 2,
+                },
+            }
+        )
+
+        exit_code, output, error = self.cli_output(
+            raw,
+            "--format",
+            "markdown",
+        )
+
+        self.assertEqual(exit_code, 0, error)
+        for label in solver.REPORT_RULE_LABELS.values():
+            self.assertIn(f"| {label} |", output)
+
+    def test_markdown_session_report_enforces_the_global_draw_cap(self):
+        raw = multi_tray_session()
+
+        exit_code, output, error = self.cli_output(
+            raw,
+            "--format",
+            "markdown",
+        )
+
+        self.assertEqual(exit_code, 0, error)
+        self.assertIn("当前端：tray-c", output)
+        self.assertIn("建议停止", output)
+        self.assertIn("| 最多抽盒数 | 1盒 | < 1盒 | 未通过 |", output)
+
+    def test_markdown_session_report_shows_a_confirmed_draw_cap_override(self):
+        raw = session_lock_fixture()["override_session"]
+
+        exit_code, output, error = self.cli_output(
+            raw,
+            "--format",
+            "markdown",
+        )
+
+        self.assertEqual(exit_code, 0, error)
+        self.assertIn("## 全款概率矩阵", output)
+        self.assertIn("| 最多抽盒数 | 1盒 | < 2盒 | 通过 |", output)
+        self.assertIn("### 已确认变更", output)
+        self.assertIn("最多抽盒数：1盒 → 2盒", output)
+
+    def test_markdown_screening_stays_compact(self):
+        raw = base_state()
+        raw["preferences"]["stop_rules"] = {
+            "min_like_any_pp": 60,
+            "max_dislike_any_pp": 10,
+        }
+
+        exit_code, output, error = self.cli_output(
+            raw,
+            "--format",
+            "markdown",
+            "--screen-tray",
+        )
+
+        self.assertEqual(exit_code, 0, error)
+        self.assertIn("端筛选快报", output)
+        self.assertIn("## 质量线", output)
+        self.assertNotIn("## TOP 3 汇总", output)
+        self.assertNotIn("## 全款概率矩阵", output)
+
+    def test_accepted_tray_returns_to_the_full_report_after_screening(self):
+        raw = session_lock_fixture()["accepted_session"]
+
+        screen_code, screening, screen_error = self.cli_output(
+            raw,
+            "--format",
+            "markdown",
+            "--screen-tray",
+        )
+        report_code, report, report_error = self.cli_output(
+            raw,
+            "--format",
+            "markdown",
+        )
+
+        self.assertEqual(screen_code, 0, screen_error)
+        self.assertEqual(report_code, 0, report_error)
+        self.assertNotIn("## 全款概率矩阵", screening)
+        self.assertIn("## TOP 3 汇总", report)
+        self.assertIn("## 全款概率矩阵", report)
+
+    def test_user_report_validation_rejects_incomplete_or_contradictory_data(self):
+        raw = base_state()
+        raw["boxes"][2].update({"status": "opened", "known": "C"})
+        report = solver.build_report(self.normalized(raw), plan_depth=1)
+
+        mutations = {}
+
+        missing_option = copy.deepcopy(report)
+        missing_option["ranking"][0]["remaining_options_desc"].pop()
+        mutations["option coverage"] = missing_option
+
+        candidate_mismatch = copy.deepcopy(report)
+        candidate_mismatch["top_3"] = list(reversed(candidate_mismatch["top_3"]))
+        mutations["top_3"] = candidate_mismatch
+
+        probability_mismatch = copy.deepcopy(report)
+        probability_mismatch["ranking"][0]["remaining_options_desc"][0][
+            "probability"
+        ] += 0.1
+        mutations["probability sum"] = probability_mismatch
+
+        action_mismatch = copy.deepcopy(report)
+        action_mismatch["next_tool_plan"]["recommended_action"][
+            "action"
+        ] = "stop"
+        action_mismatch["next_tool_plan"]["recommended_action"]["box_id"] = None
+        action_mismatch["next_tool_plan"]["action_ranking"][0] = copy.deepcopy(
+            action_mismatch["next_tool_plan"]["recommended_action"]
+        )
+        mutations["action"] = action_mismatch
+
+        for expected_error, malformed in mutations.items():
+            with self.subTest(expected_error=expected_error):
+                with self.assertRaisesRegex(solver.StateError, expected_error):
+                    solver.validate_user_report(malformed)
+
+    def test_explicit_json_format_preserves_the_default_cli_contract(self):
+        raw = base_state()
+
+        default_code, default_output, default_error = self.cli_output(raw)
+        json_code, json_output, json_error = self.cli_output(
+            raw,
+            "--format",
+            "json",
+        )
+
+        self.assertEqual(default_code, 0, default_error)
+        self.assertEqual(json_code, 0, json_error)
+        self.assertEqual(json.loads(default_output), json.loads(json_output))
+
+    def test_markdown_report_supports_all_six_strategy_names(self):
+        cases = {}
+        for strategy in ("稳妥避雷", "随便中个喜欢", "只冲最爱"):
+            raw = base_state()
+            raw["preferences"].pop("objective_mode")
+            raw["preferences"]["strategy"] = strategy
+            cases[strategy] = raw
+
+        for strategy in ("守住底线", "整体最满意"):
+            raw = base_state()
+            raw["preferences"].pop("objective_mode")
+            raw["preferences"].update(
+                {
+                    "strategy": strategy,
+                    "scores": {"A": 10, "B": 0, "C": -10},
+                }
+            )
+            if strategy == "守住底线":
+                raw["preferences"].update(
+                    {
+                        "hard_avoid": ["C"],
+                        "hard_avoid_max_pp": 100,
+                    }
+                )
+            cases[strategy] = raw
+
+        resale = base_state()
+        resale["preferences"].pop("objective_mode")
+        resale["preferences"]["strategy"] = "保值优先"
+        resale["market_values"] = {"A": 100, "B": 60, "C": 30}
+        cases["保值优先"] = resale
+
+        for strategy, raw in cases.items():
+            with self.subTest(strategy=strategy):
+                exit_code, output, error = self.cli_output(
+                    raw,
+                    "--format",
+                    "markdown",
+                )
+                self.assertEqual(exit_code, 0, error)
+                self.assertIn(f"本轮采用「{strategy}」", output)
+                self.assertIn("## 全款概率矩阵", output)
 
     def test_target_tie_order_is_deterministic(self):
         import json
