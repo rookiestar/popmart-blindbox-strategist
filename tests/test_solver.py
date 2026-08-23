@@ -134,6 +134,62 @@ class SolverTests(unittest.TestCase):
         self.assertFalse(tray_c["draw_decision"]["should_draw"])
         self.assertIn("达到最多 1 盒", tray_c["draw_decision"]["reasons"][0])
 
+    def test_switching_back_does_not_restore_global_tool_inventory(self):
+        raw = multi_tray_session()
+        raw["active_tray_id"] = "tray-a"
+        raw["events"].append(
+            {"seq": 6, "type": "tray_switch", "tray_id": "tray-a"}
+        )
+
+        report = solver.build_session_report(
+            solver._normalize_session(raw),
+            plan_depth=1,
+        )
+
+        self.assertEqual(
+            report["session_summary"]["tools"],
+            {"hint_cards": 4, "display_cards": 1, "reveal_cards": 1},
+        )
+        self.assertEqual(report["session_summary"]["active_tray_id"], "tray-a")
+        self.assertEqual(report["session_summary"]["event_count"], 6)
+        tray_b_box_1 = next(
+            row
+            for row in report["tray_reports"]["tray-b"]["ranking"]
+            if row["box_id"] == "1"
+        )
+        self.assertTrue(tray_b_box_1["tool_used"])
+        self.assertNotIn(
+            "next_tool_plan",
+            report["tray_reports"]["tray-c"],
+        )
+        self.assertIn(
+            "next_tool_plan",
+            report["tray_reports"]["tray-a"],
+        )
+
+    def test_counterfactual_tool_planning_does_not_mutate_actual_session(self):
+        raw = multi_tray_session()
+        raw["preferences"]["stop_rules"]["max_draws"] = 2
+        session = solver._normalize_session(raw)
+        before = copy.deepcopy(session)
+
+        report = solver.build_session_report(
+            session,
+            plan_depth=2,
+            beam_width=0,
+        )
+
+        plan = report["tray_reports"]["tray-c"]["next_tool_plan"]
+        self.assertTrue(
+            any(
+                action["tool"] != "none"
+                for action in plan["action_ranking"]
+            )
+        )
+        self.assertEqual(session, before)
+        self.assertEqual(report["actual_events"], before["events"])
+        self.assertEqual(report["session_summary"]["event_count"], 5)
+
     def test_accepted_tray_lock_reaches_the_complete_session_report(self):
         raw = session_lock_fixture()["accepted_session"]
         session = solver._normalize_session(raw)
