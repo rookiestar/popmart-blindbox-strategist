@@ -6,6 +6,10 @@
   quantified TOP 3 comparison, full design-by-box probability matrix, every
   configured stop line, next action, and model warnings; JSON remains the
   default compatible interface and timed tray screening remains compact.
+- Made the Skill relay that validated report unchanged for initial decisions,
+  kept trays, real clue updates, and post-open follow-ups; added synthetic
+  short-turn regressions for preserved requirements, exclusions, leader
+  changes, and no-qualified-box stops.
 - Added GitHub Actions checks for the full test suite, public-package
   validation, history validation, and whitespace errors on pull requests and
   `main`.

@@ -1,0 +1,325 @@
+{
+  "meta": {
+    "provenance": "synthetic",
+    "notes": [
+      "公开 Agent 报告回归；款式、消息和状态均为合成数据。"
+    ]
+  },
+  "scenarios": [
+    {
+      "name": "demand-unchanged-new-tray",
+      "message": "重来，需求不变",
+      "previous_state": {
+        "session_schema_version": 1,
+        "series": "合成短输入系列",
+        "active_tray_id": "tray-a",
+        "accepted_tray_id": null,
+        "draws_used": 0,
+        "preferences": {
+          "liked": ["A"],
+          "disliked": ["C"],
+          "strategy": "随便中个喜欢",
+          "tie_tolerance_pp": 0,
+          "stop_rules": {
+            "min_like_any_pp": 20,
+            "max_dislike_any_pp": 60,
+            "max_draws": 1
+          }
+        },
+        "tools": {
+          "hint_cards": 0,
+          "display_cards": 0
+        },
+        "trays": [
+          {
+            "id": "tray-a",
+            "model": {
+              "type": "unique_regular",
+              "designs": ["A", "B", "C"]
+            },
+            "boxes": [
+              {"id": "1", "excluded": ["C"], "status": "available"},
+              {"id": "2", "excluded": [], "status": "available"},
+              {"id": "3", "excluded": [], "status": "sold_unknown"}
+            ]
+          }
+        ],
+        "events": [
+          {"seq": 1, "type": "tray_switch", "tray_id": "tray-a"}
+        ],
+        "meta": {
+          "provenance": "synthetic"
+        }
+      },
+      "state": {
+        "session_schema_version": 1,
+        "series": "合成短输入系列",
+        "active_tray_id": "tray-b",
+        "accepted_tray_id": null,
+        "draws_used": 0,
+        "preferences": {
+          "liked": ["A"],
+          "disliked": ["C"],
+          "strategy": "随便中个喜欢",
+          "tie_tolerance_pp": 0,
+          "stop_rules": {
+            "min_like_any_pp": 20,
+            "max_dislike_any_pp": 60,
+            "max_draws": 1
+          }
+        },
+        "tools": {
+          "hint_cards": 0,
+          "display_cards": 0
+        },
+        "trays": [
+          {
+            "id": "tray-a",
+            "model": {
+              "type": "unique_regular",
+              "designs": ["A", "B", "C"]
+            },
+            "boxes": [
+              {"id": "1", "excluded": ["C"], "status": "available"},
+              {"id": "2", "excluded": [], "status": "available"},
+              {"id": "3", "excluded": [], "status": "sold_unknown"}
+            ]
+          },
+          {
+            "id": "tray-b",
+            "model": {
+              "type": "unique_regular",
+              "designs": ["A", "B", "C"]
+            },
+            "boxes": [
+              {"id": "1", "excluded": [], "status": "available"},
+              {"id": "2", "excluded": [], "status": "available"},
+              {"id": "3", "excluded": [], "status": "available"}
+            ]
+          }
+        ],
+        "events": [
+          {"seq": 1, "type": "tray_switch", "tray_id": "tray-a"},
+          {"seq": 2, "type": "tray_switch", "tray_id": "tray-b"}
+        ],
+        "meta": {
+          "provenance": "synthetic"
+        }
+      },
+      "expected": {
+        "active_tray_id": "tray-b",
+        "strategy": "随便中个喜欢",
+        "top_box_id": "1",
+        "conclusion": "建议抽 1 号"
+      }
+    },
+    {
+      "name": "new-exclusion",
+      "message": "2号排除了C",
+      "previous_state": {
+        "series": "合成短输入系列",
+        "model": {
+          "type": "unique_regular",
+          "designs": ["A", "B", "C"]
+        },
+        "boxes": [
+          {"id": "1", "excluded": [], "status": "available"},
+          {"id": "2", "excluded": [], "status": "available"},
+          {"id": "3", "excluded": [], "status": "available"}
+        ],
+        "preferences": {
+          "liked": ["A"],
+          "disliked": ["C"],
+          "strategy": "随便中个喜欢",
+          "tie_tolerance_pp": 0
+        },
+        "tools": {
+          "hint_cards": 1,
+          "display_cards": 0
+        },
+        "meta": {
+          "provenance": "synthetic"
+        }
+      },
+      "state": {
+        "session_schema_version": 1,
+        "series": "合成短输入系列",
+        "active_tray_id": "tray-a",
+        "accepted_tray_id": null,
+        "draws_used": 0,
+        "preferences": {
+          "liked": ["A"],
+          "disliked": ["C"],
+          "strategy": "随便中个喜欢",
+          "tie_tolerance_pp": 0
+        },
+        "tools": {
+          "hint_cards": 0,
+          "display_cards": 0
+        },
+        "trays": [
+          {
+            "id": "tray-a",
+            "model": {
+              "type": "unique_regular",
+              "designs": ["A", "B", "C"]
+            },
+            "boxes": [
+              {"id": "1", "excluded": [], "status": "available"},
+              {
+                "id": "2",
+                "excluded": ["C"],
+                "status": "available",
+                "tool_used": true
+              },
+              {"id": "3", "excluded": [], "status": "available"}
+            ]
+          }
+        ],
+        "events": [
+          {
+            "seq": 1,
+            "type": "hint_used",
+            "tray_id": "tray-a",
+            "box_id": "2",
+            "excluded": "C"
+          }
+        ],
+        "meta": {
+          "provenance": "synthetic"
+        }
+      },
+      "expected": {
+        "strategy": "随便中个喜欢",
+        "top_box_id": "2",
+        "conclusion": "建议抽 2 号",
+        "matrix_contains": "| C | 已排除",
+        "event_contains": "最新信息：2号排除 C"
+      }
+    },
+    {
+      "name": "leader-change",
+      "message": "1号排除了A",
+      "previous_state": {
+        "series": "合成短输入系列",
+        "model": {
+          "type": "unique_regular",
+          "designs": ["A", "B", "C"]
+        },
+        "boxes": [
+          {"id": "1", "excluded": [], "status": "available"},
+          {"id": "2", "excluded": [], "status": "available"},
+          {"id": "3", "excluded": [], "status": "available"}
+        ],
+        "preferences": {
+          "liked": ["A"],
+          "disliked": ["C"],
+          "strategy": "随便中个喜欢",
+          "tie_tolerance_pp": 0
+        },
+        "tools": {
+          "hint_cards": 1,
+          "display_cards": 0
+        },
+        "meta": {
+          "provenance": "synthetic"
+        }
+      },
+      "state": {
+        "session_schema_version": 1,
+        "series": "合成短输入系列",
+        "active_tray_id": "tray-a",
+        "accepted_tray_id": null,
+        "draws_used": 0,
+        "preferences": {
+          "liked": ["A"],
+          "disliked": ["C"],
+          "strategy": "随便中个喜欢",
+          "tie_tolerance_pp": 0
+        },
+        "tools": {
+          "hint_cards": 0,
+          "display_cards": 0
+        },
+        "trays": [
+          {
+            "id": "tray-a",
+            "model": {
+              "type": "unique_regular",
+              "designs": ["A", "B", "C"]
+            },
+            "boxes": [
+              {
+                "id": "1",
+                "excluded": ["A"],
+                "status": "available",
+                "tool_used": true
+              },
+              {"id": "2", "excluded": [], "status": "available"},
+              {"id": "3", "excluded": [], "status": "available"}
+            ]
+          }
+        ],
+        "events": [
+          {
+            "seq": 1,
+            "type": "hint_used",
+            "tray_id": "tray-a",
+            "box_id": "1",
+            "excluded": "A"
+          }
+        ],
+        "meta": {
+          "provenance": "synthetic"
+        }
+      },
+      "expected": {
+        "previous_top_box_id": "1",
+        "top_box_id": "2",
+        "conclusion": "建议抽 2 号",
+        "matrix_contains": "| A | 50.00% | 50.00% | 已排除 |",
+        "event_contains": "最新信息：1号排除 A"
+      }
+    },
+    {
+      "name": "no-qualified-box",
+      "message": "现在还值得抽吗",
+      "state": {
+        "series": "合成短输入系列",
+        "model": {
+          "type": "unique_regular",
+          "designs": ["A", "B", "C"]
+        },
+        "boxes": [
+          {"id": "1", "excluded": [], "status": "available"},
+          {"id": "2", "excluded": [], "status": "available"},
+          {"id": "3", "excluded": [], "status": "available"}
+        ],
+        "preferences": {
+          "liked": ["A"],
+          "disliked": ["C"],
+          "strategy": "随便中个喜欢",
+          "tie_tolerance_pp": 0,
+          "stop_rules": {
+            "min_like_any_pp": 90,
+            "max_dislike_any_pp": 100,
+            "max_draws": 1
+          }
+        },
+        "tools": {
+          "hint_cards": 0,
+          "display_cards": 0
+        },
+        "meta": {
+          "provenance": "synthetic"
+        }
+      },
+      "expected": {
+        "strategy": "随便中个喜欢",
+        "top_box_id": "1",
+        "conclusion": "建议停止",
+        "stop_status": "未通过"
+      }
+    }
+  ]
+}

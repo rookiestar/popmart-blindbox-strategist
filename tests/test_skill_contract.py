@@ -284,6 +284,34 @@ class SkillContractTests(unittest.TestCase):
         )
         self.assertIn("直接上传当前端截图即可", output)
 
+    def test_formal_decisions_relay_one_validated_markdown_contract(self):
+        skill = (ROOT / "SKILL.md").read_text()
+        output = (ROOT / "references" / "output-templates.md").read_text()
+        evals = (ROOT / "references" / "review-and-evals.md").read_text()
+
+        self.assertIn(
+            "python3 scripts/blindbox_solver.py <state.json> --format markdown",
+            skill,
+        )
+        self.assertIn("原样转交 stdout", skill)
+        self.assertIn("不得手工摘要", skill)
+        for trigger in (
+            "初次正式建议",
+            "保留当前端",
+            "真实提示或显示结果",
+            "开盒后的追抽判断",
+            "重来，需求不变",
+            "排除了",
+        ):
+            self.assertIn(trigger, skill)
+
+        self.assertIn("机器契约的唯一事实来源", output)
+        self.assertIn("--format markdown", output)
+        self.assertNotIn("### 1）X号：所有未显式排除选项", output)
+
+        self.assertIn("E22 — Standard report handoff", evals)
+        self.assertIn("agent-report-regressions.json", evals)
+
 
 if __name__ == "__main__":
     unittest.main()

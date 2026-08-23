@@ -2879,11 +2879,63 @@ def _without_terminal_period(text: Any) -> str:
     return str(text).rstrip().rstrip("。.!！")
 
 
-def _strategy_comparison_sentence(report: Mapping[str, Any]) -> str:
+def _stop_rule_value_text(rule: str, value: Any) -> str:
+    if value is None:
+        return "未配置"
+    if rule.endswith("_pp"):
+        return _pp(value)
+    if rule == "max_draws":
+        return f"{int(value)}盒"
+    if rule == "min_expected_score":
+        return f"{float(value):.2f}"
+    return str(value)
+
+
+def _latest_event_clause(
+    report: Mapping[str, Any],
+    tray_id: Optional[str],
+) -> str:
+    events = report.get("actual_events")
+    if tray_id is None or not isinstance(events, list) or not events:
+        return ""
+    event = events[-1]
+    if not isinstance(event, Mapping) or event.get("tray_id") != tray_id:
+        return ""
+    event_type = event.get("type")
+    box_id = _markdown_cell(event.get("box_id", ""))
+    if event_type == "hint_used":
+        excluded = _markdown_cell(event.get("excluded", ""))
+        return f"最新信息：{box_id}号排除 {excluded}；"
+    if event_type == "display_used":
+        design = _markdown_cell(event.get("design", ""))
+        return f"最新信息：{box_id}号显示为 {design}；"
+    if event_type == "opened_result":
+        design = _markdown_cell(event.get("design", ""))
+        return f"最新信息：{box_id}号开出 {design}；"
+    if event_type == "tray_switch":
+        return f"最新信息：已切换至 {_markdown_cell(tray_id)}；"
+    if event_type == "tray_accepted":
+        return f"最新信息：已保留 {_markdown_cell(tray_id)}；"
+    if event_type == "tray_released":
+        return f"最新信息：已释放 {_markdown_cell(tray_id)}；"
+    if event_type == "stop_rule_override":
+        rule = str(event.get("rule", ""))
+        label = REPORT_RULE_LABELS.get(rule, rule)
+        old_text = _stop_rule_value_text(rule, event.get("old_value"))
+        new_text = _stop_rule_value_text(rule, event.get("new_value"))
+        return f"最新信息：已将{label}从 {old_text} 调整为 {new_text}；"
+    return ""
+
+
+def _strategy_comparison_sentence(
+    report: Mapping[str, Any],
+    *,
+    event_clause: str = "",
+) -> str:
     ranking = report["ranking"]
     first = ranking[0]
     if len(ranking) == 1:
-        return (
+        return event_clause + (
             f"只有 {first['box_id']} 号可选，喜欢款 "
             f"{_percent(first['p_like_any'])}，不喜欢款 "
             f"{_percent(first['p_dislike_any'])}。"
@@ -2969,7 +3021,7 @@ def _strategy_comparison_sentence(report: Mapping[str, Any]) -> str:
             f"相差 {delta:.2f}{suffix}，处于 {tolerance:.2f} 点排序容差后"
             "由后续指标胜出"
         )
-    return (
+    return event_clause + (
         f"首选 {first['box_id']} 号对次优 {second['box_id']} 号："
         f"{label} {first_value:.2f}{suffix} vs "
         f"{second_value:.2f}{suffix}{secondary}，{comparison}。"
@@ -3156,6 +3208,12 @@ def _render_stop_lines(checks: Sequence[Mapping[str, Any]]) -> List[str]:
     return lines
 
 
+def _reader_warning_message(warning: Mapping[str, Any]) -> str:
+    if warning.get("code") == "regular_only_scope":
+        return "隐藏款：默认未计入。"
+    return str(warning.get("message", "")).strip()
+
+
 def _render_model_notes(report: Mapping[str, Any]) -> List[str]:
     model = report["model_summary"]
     lines = [f"- {model['probability_statement']}"]
@@ -3164,7 +3222,7 @@ def _render_model_notes(report: Mapping[str, Any]) -> List[str]:
         lines.append(f"- 有效整盒分配：{int(assignments):,}。")
     seen: set[str] = set()
     for warning in report.get("model_warnings", []):
-        message = str(warning.get("message", "")).strip()
+        message = _reader_warning_message(warning)
         if message and message not in seen:
             lines.append(f"- {message}")
             seen.add(message)
@@ -3191,19 +3249,8 @@ def _render_rule_overrides(report: Mapping[str, Any]) -> List[str]:
         label = REPORT_RULE_LABELS.get(rule, rule)
         old_value = event.get("old_value")
         new_value = event.get("new_value")
-        if rule.endswith("_pp"):
-            old_text = "未配置" if old_value is None else _pp(old_value)
-            new_text = "未配置" if new_value is None else _pp(new_value)
-        elif rule == "max_draws":
-            old_text = (
-                "未配置" if old_value is None else f"{int(old_value)}盒"
-            )
-            new_text = (
-                "未配置" if new_value is None else f"{int(new_value)}盒"
-            )
-        else:
-            old_text = "未配置" if old_value is None else str(old_value)
-            new_text = "未配置" if new_value is None else str(new_value)
+        old_text = _stop_rule_value_text(rule, old_value)
+        new_text = _stop_rule_value_text(rule, new_value)
         reason = _markdown_cell(event.get("reason", ""))
         lines.append(
             f"- {label}：{old_text} → {new_text}（{reason}）。"
@@ -3271,7 +3318,7 @@ def _render_screening_markdown(
         ]
     )
     for warning in report.get("model_warnings", []):
-        lines.append(f"- {warning['message']}")
+        lines.append(f"- {_reader_warning_message(warning)}")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -3287,6 +3334,7 @@ def render_user_markdown(
         return _render_screening_markdown(active, tray_id)
 
     conclusion, next_action = _conclusion_and_next_action(active)
+    event_clause = _latest_event_clause(report, tray_id)
     strategy_sentence = (
         f"本轮采用「{active['strategy_name']}」："
         f"{_without_terminal_period(active['strategy_rule'])}。"
@@ -3306,7 +3354,7 @@ def render_user_markdown(
             "## 决策依据",
             "",
             f"- {strategy_sentence}",
-            f"- {_strategy_comparison_sentence(active)}",
+            f"- {_strategy_comparison_sentence(active, event_clause=event_clause)}",
             f"- {_action_sentence(active)}",
             "",
             "## TOP 3 汇总",
