@@ -96,11 +96,14 @@ Cover every regular design. Cite current claims inline. If only QianDao is usabl
 **下一步：直接抽 / 停止 / 使用提示卡 / 使用显示卡。**
 
 - 不用卡基线：直接抽 X号 / 停止
+- 实用收益门槛：...pp；本动作主指标提升：...pp；通过/未通过
 - 若推荐卡片：使用后自适应选择的期望为喜欢合计 ...%，不喜欢合计 ...%
 - 若推荐卡片：结果后仍建议抽盒的概率为 ...%
+- 若推荐卡片：自适应策略预计消耗 ... 张卡
 - 若推荐卡片：相对不用卡，喜欢 +...pp；不喜欢 -...pp
 - 若推荐卡片：列关键分支，并在真实结果后重算
-- 若启用两步：只执行首步；说明单步首选是否仍为两步最优，并列“两卡终局相对一卡终局”的增益
+- 若启用两步：只执行首步；分别说明首步身份是否改变、终局是否等价，
+  并列“两卡终局相对一卡终局”的增益
 ```
 
 The “all options” tables must be complete for each top-three box. Do not show only liked and disliked subsets.
@@ -130,7 +133,8 @@ The “all options” tables must be complete for each top-three box. Do not sho
 - 剩余显示卡：M
 - 动作排名：直接抽/停止、提示卡、显示卡
 - 当前建议：...
-- 两步规划（若启用）：首步...；单步首选仍最优/已改变；两卡终局相对一卡终局...pp
+- 两步规划（若启用）：首步...；身份未变/已变；终局等价/不等价；
+  预计用卡...张；两卡终局相对一卡终局...pp
 ```
 
 Every update must recompute the whole tray. Do not only update the affected box.

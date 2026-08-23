@@ -161,7 +161,10 @@ Use these user-facing strategy names:
 - `只冲最爱`
 - `保值优先`
 
-Read `references/preference-strategies.md` for exact rules, required inputs, scoring, and stopping conditions. Keep `tie_tolerance_pp: 0.5` unless the user requests strict mathematical ordering.
+Read `references/preference-strategies.md` for exact rules, required inputs,
+scoring, and stopping conditions. Keep `tie_tolerance_pp: 0.5` unless the user
+requests strict mathematical ordering. Unless explicitly overridden,
+`min_tool_uplift_pp` inherits the same value.
 
 ### Required calculation output
 
@@ -203,14 +206,22 @@ python3 scripts/blindbox_solver.py <state.json> --plan-depth 2 --digits 10
 
 Then:
 
-1. Compare direct draw or stop with every eligible hint/display action under the declared objective at every planning layer. Recommend a card only when it ranks above the no-card action; numerical zero-uplift ties use no card.
+1. Compare direct draw or stop with every eligible hint/display action under
+   the declared objective at every planning layer. When direct draw already
+   passes every stop rule, spend a card only if normalized primary uplift
+   reaches `min_tool_uplift_pp`. When direct draw fails, keep a card eligible
+   if any outcome branch passes every stop rule. Numerical ties use no card.
 2. Quantify expected uplift in liked probability and expected change in disliked probability.
 3. Show the important conditional branches: which outcomes make another box overtake the current leader.
 4. For multiple available tools, give a provisional second/third priority but instruct that the calculation must be rerun after the actual first outcome.
 5. If the platform forces simultaneous use, rank eligible boxes by one-step value of information and avoid spending multiple tools on near-duplicate boxes unless diversification is still optimal.
 6. Never target a box whose `tool_used` is already true.
 7. If the user explicitly enabled a hidden mixture, block exact hint-card planning when hidden designs cannot appear as hint labels.
-8. For depth two, report only the first action, whether one-step's first action remains two-step-optimal, and `gain_vs_one_card_horizon`. Explain that this gain compares two-card versus one-card horizons; it does not prove rolling one-step replanning is worse.
+8. Report `expected_tools_used`. Equivalent terminal policies prefer fewer
+   cards. For depth two, report only the first action, whether its identity
+   changed from depth one, whether terminal value is equivalent, and
+   `gain_vs_one_card_horizon`. Explain that this gain compares two-card versus
+   one-card horizons; it does not prove rolling one-step replanning is worse.
 9. The plan payload is compact by default: branches carry only the decision
    summary and `action_ranking` keeps the top 3 actions (the rest appear as
    `other_actions_ranked` one-line summaries). Depth two expands the second

@@ -118,13 +118,28 @@ to a purchase. This prevents averaging safe and unsafe branches into a false
 ## 8. Adaptive planning horizons
 
 The default one-step planner ranks direct draw or stop together with every
-eligible next card. The no-card action wins numerical zero-uplift ties, so
-floating-point dust cannot spend a card. After an actual outcome, rerun.
+eligible next card. When direct draw already passes every stop rule, a card
+must reach `min_tool_uplift_pp` (default: `tie_tolerance_pp`) on the normalized
+primary strategy metric. Below-threshold actions stay in the audit ranking but
+cannot beat no card. When direct draw fails, a card with any positive
+probability of a fully qualifying branch remains a rescue route.
+The no-card action wins numerical zero-uplift ties.
+
+Primary uplift is normalized onto a percentage-point span without changing box
+ranking: target strategies use liked probability, risk-first uses
+severity-weighted disliked-risk reduction, score strategies use the `-10..+10`
+score range, and resale uses the supplied lineup's value range. Set
+`min_tool_uplift_pp: 0` for strict maximization.
 
 Optional depth-two planning expands one more adaptive layer. Every first-card
 outcome chooses its own best second action, including direct draw or stop. It
 returns only the first action for execution; the real outcome must still be
 written into state before replanning.
+
+Every policy reports `expected_tools_used`. Terminally equivalent policies
+prefer fewer cards, preventing a redundant setup card from being inserted
+before the effective depth-one action. Depth two separately reports first
+action identity change and terminal-value equivalence.
 
 To keep depth two inside the online timer, the second layer expands only the
 top `beam_width` (default 3) depth-1 card actions; every other card action
@@ -137,10 +152,11 @@ Use `--plan-depth 2` only when at least two cards remain and the online timer
 allows the slower exact calculation. Keep depth one as the default.
 
 `gain_vs_one_card_horizon` compares the best policy allowed up to two cards
-with drawing or stopping after at most one card. If the one-step first action
-remains optimal under the two-step horizon, rolling one-step replanning has no
-demonstrated first-decision loss even when the two-card terminal probability
-is higher.
+with drawing or stopping after at most one card.
+`first_action_changed_vs_depth_1` compares executable action identity;
+`terminal_value_practically_equivalent_to_depth_1` compares terminal value.
+If identity is unchanged, rolling one-step replanning has no demonstrated
+first-decision loss even when the two-card terminal probability is higher.
 
 ## 9. Tool value versus tool price
 
@@ -165,7 +181,11 @@ Before presenting results, verify:
 - in a single no-secret scenario, each design's probabilities across all tray positions sum to 1;
 - top-three option tables omit explicit exclusions and retain globally impossible zero-probability labels with a note;
 - probabilities shown to the user are derived from the latest state, not a previous branch;
-- direct draw or stop participates at every planning layer, and the no-card action wins numerical zero-uplift ties;
+- direct draw or stop participates at every planning layer, and the no-card
+  action wins below-threshold practical uplifts;
+- rescue routes remain eligible when direct draw fails;
+- equivalent terminal policies use fewer expected cards and report depth-two
+  action identity separately from terminal equivalence;
 - no user tool is planned on a box with `tool_used: true`.
 
 ## 11. Unsupported or ambiguous situations

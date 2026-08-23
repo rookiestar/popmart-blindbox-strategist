@@ -335,6 +335,12 @@ Read `references/tray-screening.md` for status meanings and the timed workflow.
 
 `tie_tolerance_pp` is the practical-comparison bucket size in percentage points. Default `0.5` prevents tiny numeric differences from dominating weighted-risk or target comparisons. Set to `0` for strict unbucketed ordering.
 
+`min_tool_uplift_pp` is the minimum normalized primary-strategy improvement
+required to spend a card when direct draw already passes every stop rule. It
+defaults to `tie_tolerance_pp`; set it explicitly to `0` for strict
+mathematical maximization. Rescue cards that create a nonzero qualifying draw
+branch remain eligible when direct draw fails.
+
 ## `tools`
 
 - `hint_cards`: remaining hint cards.

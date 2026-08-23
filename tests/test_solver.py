@@ -49,6 +49,16 @@ def multi_tray_session():
     return json.loads(fixture.read_text(encoding="utf-8"))
 
 
+def tool_planning_fixture():
+    fixture = (
+        MODULE_PATH.parents[1]
+        / "tests"
+        / "fixtures"
+        / "tool-planning-boundaries.json"
+    )
+    return json.loads(fixture.read_text(encoding="utf-8"))
+
+
 class SolverTests(unittest.TestCase):
     def normalized(self, state=None):
         return solver._normalize_state(state or base_state())
@@ -526,6 +536,7 @@ class SolverTests(unittest.TestCase):
                 "scores": {"A": 10, "B": 9, "C": 0},
                 "stop_rules": {"min_favorite_any_pp": 60},
                 "tie_tolerance_pp": 0,
+                "min_tool_uplift_pp": 50,
             },
             "tools": {"display_cards": 1},
         }
@@ -535,6 +546,13 @@ class SolverTests(unittest.TestCase):
         self.assertEqual(screening["status"], "tool_dependent")
         self.assertEqual(screening["recommendation"], "keep_if_using_tool")
         self.assertEqual(screening["one_card_action"]["tool"], "display")
+        self.assertTrue(
+            screening["one_card_action"]["passes_tool_uplift_gate"]
+        )
+        self.assertEqual(
+            screening["one_card_action"]["tool_gate_reason"],
+            "rescue_route",
+        )
         self.assertAlmostEqual(
             screening["one_card_action"]["expected_draw_probability"],
             1 / 3,
@@ -542,6 +560,180 @@ class SolverTests(unittest.TestCase):
         self.assertEqual(
             [check["rule"] for check in screening["failed_acceptance_rules"]],
             ["min_favorite_any_pp"],
+        )
+
+    def test_practical_tool_gate_uses_report_level_synthetic_boundaries(self):
+        fixture = tool_planning_fixture()
+        base_path = (
+            MODULE_PATH.parents[1]
+            / "examples"
+            / fixture["base_example"]
+        )
+        base = json.loads(base_path.read_text(encoding="utf-8"))
+
+        for case in fixture["direct_ready_cases"]:
+            with self.subTest(case=case["name"]):
+                raw = copy.deepcopy(base)
+                liked = list(case["liked"])
+                hard_avoid = case["hard_avoid"]
+                raw["preferences"] = {
+                    "liked": liked,
+                    "disliked": [hard_avoid],
+                    "hard_avoid": [hard_avoid],
+                    "strategy": "随便中个喜欢",
+                    "scores": {
+                        **{design: 10 for design in liked},
+                        hard_avoid: -10,
+                    },
+                    "score_default": 0,
+                    "tie_tolerance_pp": 0.5,
+                }
+                disabled = set(case["disable_tool_boxes"])
+                for box in raw["boxes"]:
+                    if box["id"] in disabled:
+                        box["tool_used"] = True
+
+                report = solver.build_report(
+                    self.normalized(raw),
+                    plan_depth=1,
+                )
+                plan = report["next_tool_plan"]
+                target = next(
+                    action
+                    for action in plan["action_ranking"]
+                    if action["tool"] == "hint"
+                    and action["box_id"] == case["target_box_id"]
+                )
+
+                self.assertEqual(
+                    report["tool_policy"],
+                    {
+                        "min_tool_uplift_pp": 0.5,
+                        "source": "tie_tolerance_pp",
+                    },
+                )
+                self.assertAlmostEqual(
+                    target["primary_uplift_pp"],
+                    case["expected_primary_uplift_pp"],
+                    places=10,
+                )
+                self.assertEqual(
+                    plan["recommended_action"]["tool"],
+                    case["expected_recommended_tool"],
+                )
+                expected_gate = case["expected_recommended_tool"] != "none"
+                self.assertEqual(
+                    target["passes_tool_uplift_gate"],
+                    expected_gate,
+                )
+                hard_delta = target["uplift_vs_no_card"][
+                    "p_hard_avoid_pp"
+                ]
+                score_delta = target["uplift_vs_no_card"][
+                    "expected_score"
+                ]
+                self.assertEqual(
+                    hard_delta > 0,
+                    case["expected_hard_avoid_delta"] == "positive",
+                )
+                self.assertEqual(
+                    score_delta > 0,
+                    case["expected_score_delta"] == "positive",
+                )
+
+    def test_explicit_zero_tool_gate_restores_strict_maximization(self):
+        fixture = tool_planning_fixture()
+        case = fixture["direct_ready_cases"][0]
+        base_path = (
+            MODULE_PATH.parents[1]
+            / "examples"
+            / fixture["base_example"]
+        )
+        raw = json.loads(base_path.read_text(encoding="utf-8"))
+        raw["preferences"] = {
+            "liked": list(case["liked"]),
+            "disliked": [],
+            "strategy": "随便中个喜欢",
+            "tie_tolerance_pp": 0.5,
+            "min_tool_uplift_pp": 0,
+        }
+        disabled = set(case["disable_tool_boxes"])
+        for box in raw["boxes"]:
+            if box["id"] in disabled:
+                box["tool_used"] = True
+        state = self.normalized(raw)
+        plan = solver.plan_one_tool(
+            state,
+            solver.analyze_posterior(state),
+        )
+
+        self.assertEqual(state["preferences"]["min_tool_uplift_pp"], 0)
+        self.assertEqual(
+            state["preferences"]["min_tool_uplift_source"],
+            "explicit",
+        )
+        self.assertEqual(plan["recommended_action"]["tool"], "hint")
+        self.assertEqual(
+            plan["recommended_action"]["box_id"],
+            case["target_box_id"],
+        )
+
+    def test_explicit_zero_tool_gate_preserves_secondary_strategy_order(self):
+        raw = {
+            "series": "strict-secondary-order",
+            "model": {
+                "type": "unique_regular",
+                "designs": ["A", "B", "C", "D"],
+                "hint_labels": ["A", "B", "C", "D"],
+            },
+            "boxes": [
+                {"id": "1", "excluded": [], "status": "available"},
+                {
+                    "id": "2",
+                    "excluded": [],
+                    "status": "available",
+                    "tool_used": True,
+                },
+                {
+                    "id": "3",
+                    "excluded": ["A", "B"],
+                    "status": "available",
+                    "tool_used": True,
+                },
+                {
+                    "id": "4",
+                    "excluded": ["A", "B"],
+                    "status": "available",
+                    "tool_used": True,
+                },
+            ],
+            "preferences": {
+                "liked": ["A", "B"],
+                "disliked": [],
+                "strategy": "随便中个喜欢",
+                "tie_tolerance_pp": 0.5,
+                "min_tool_uplift_pp": 0,
+            },
+            "tools": {"hint_cards": 1},
+            "meta": {"provenance": "synthetic"},
+        }
+        report = solver.build_report(self.normalized(raw), plan_depth=1)
+        plan = report["next_tool_plan"]
+        direct = next(
+            action
+            for action in plan["action_ranking"]
+            if action["tool"] == "none"
+        )
+        recommended = plan["recommended_action"]
+
+        self.assertEqual(recommended["tool"], "hint")
+        self.assertEqual(recommended["box_id"], "1")
+        self.assertAlmostEqual(recommended["primary_uplift_pp"], 0.0)
+        self.assertGreater(
+            recommended["expected_terminal_metrics"][
+                "liked_probabilities"
+            ]["A"],
+            direct["expected_terminal_metrics"]["liked_probabilities"]["A"],
         )
 
     def test_tray_screening_recommends_switch_when_no_route_meets_the_lines(self):
@@ -912,6 +1104,37 @@ class SolverTests(unittest.TestCase):
             )
         )
 
+    def test_two_step_skips_a_redundant_setup_card(self):
+        raw = tool_planning_fixture()["redundant_first_state"]
+        state = self.normalized(raw)
+        posterior = solver.analyze_posterior(state)
+        one_step = solver.plan_tools(state, posterior, depth=1)
+        two_step = solver.plan_tools(
+            state,
+            posterior,
+            depth=2,
+            beam_width=0,
+        )
+
+        self.assertEqual(one_step["recommended_action"]["box_id"], "2")
+        self.assertEqual(two_step["recommended_action"]["box_id"], "2")
+        self.assertEqual(
+            two_step["recommended_action"]["expected_tools_used"],
+            1.0,
+        )
+        redundant = next(
+            action
+            for action in two_step["action_ranking"]
+            if action["tool"] == "hint" and action["box_id"] == "1"
+        )
+        self.assertGreater(redundant["expected_tools_used"], 1.0)
+        self.assertFalse(two_step["first_action_changed_vs_depth_1"])
+        self.assertTrue(
+            two_step[
+                "terminal_value_practically_equivalent_to_depth_1"
+            ]
+        )
+
     def test_favorite_stop_rule_applies_at_both_planning_layers(self):
         raw = {
             "series": "favorite-stop-two-step",
@@ -1008,6 +1231,9 @@ class SolverTests(unittest.TestCase):
         self.assertEqual(plan["depth_1_recommended_action"]["box_id"], "1")
         self.assertEqual(plan["recommended_action"]["box_id"], "3")
         self.assertTrue(plan["first_action_changed_vs_depth_1"])
+        self.assertFalse(
+            plan["terminal_value_practically_equivalent_to_depth_1"]
+        )
         self.assertAlmostEqual(
             plan["recommended_action"]["expected_terminal_metrics"]["p_like_any"],
             2 / 3,
