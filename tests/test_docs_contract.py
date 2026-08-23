@@ -88,7 +88,13 @@ class DocsContractTests(unittest.TestCase):
             self.assertEqual(
                 exit_code, 0, f"{doc}: {command}"
             )
-            json.loads(stdout.getvalue())
+            output = stdout.getvalue()
+            if "--format markdown" in command:
+                self.assertTrue(output.startswith("# "), f"{doc}: {command}")
+                self.assertIn("## 结论", output, f"{doc}: {command}")
+                self.assertIn("## 下一步", output, f"{doc}: {command}")
+            else:
+                json.loads(output)
             ran += 1
         self.assertGreaterEqual(
             ran, 5, "documented solver commands vanished from the skill docs"

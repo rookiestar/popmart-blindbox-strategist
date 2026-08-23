@@ -126,10 +126,17 @@ E. 优先保值
 python3 scripts/blindbox_solver.py examples/minimal-demo.json
 ```
 
+面向用户的完整决策报告（自动执行一道具规划并校验完整性）：
+
+```bash
+python3 scripts/blindbox_solver.py examples/minimal-demo.json --format markdown
+```
+
 快速筛端：
 
 ```bash
-python3 scripts/blindbox_solver.py examples/minimal-demo.json --screen-tray
+python3 scripts/blindbox_solver.py examples/minimal-demo.json \
+  --screen-tray --format markdown
 ```
 
 千岛公开市场快照：
