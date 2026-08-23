@@ -77,6 +77,83 @@ The solver accepts one JSON object. Preserve this state across turns and mutate 
 }
 ```
 
+## Multi-tray session envelope
+
+Use the session envelope as soon as the user switches trays. Preferences,
+remaining tools, and the draw cap are session-wide; each tray keeps its own
+model, boxes, clues, known results, and `tool_used` flags.
+
+```json
+{
+  "session_schema_version": 1,
+  "series": "合成系列",
+  "active_tray_id": "tray-b",
+  "draws_used": 1,
+  "preferences": {
+    "liked": ["A"],
+    "disliked": ["C"],
+    "strategy": "随便中个喜欢",
+    "stop_rules": {"max_draws": 2}
+  },
+  "tools": {"hint_cards": 4, "display_cards": 1},
+  "trays": [
+    {
+      "id": "tray-a",
+      "model": {"type": "unique_regular", "designs": ["A", "B", "C"]},
+      "boxes": [
+        {"id": "1", "excluded": ["C"], "status": "available"},
+        {"id": "2", "excluded": [], "status": "available"},
+        {"id": "3", "excluded": [], "known": "B", "status": "opened"}
+      ]
+    },
+    {
+      "id": "tray-b",
+      "model": {"type": "unique_regular", "designs": ["A", "B", "C"]},
+      "boxes": [
+        {"id": "1", "excluded": ["B"], "status": "available"},
+        {"id": "2", "excluded": [], "status": "available"},
+        {"id": "3", "excluded": [], "status": "sold_unknown"}
+      ]
+    }
+  ],
+  "events": [
+    {"seq": 1, "type": "tray_switch", "tray_id": "tray-a"},
+    {
+      "seq": 2,
+      "type": "opened_result",
+      "tray_id": "tray-a",
+      "box_id": "3",
+      "design": "B"
+    },
+    {"seq": 3, "type": "tray_switch", "tray_id": "tray-b"}
+  ],
+  "meta": {"provenance": "synthetic"}
+}
+```
+
+- `active_tray_id` must identify one stable tray ID.
+- `draws_used` must equal the opened-box total across all retained trays.
+- `tools` is the single remaining inventory used by every tray report.
+- `events` is append-only and uses contiguous `seq` values from `1`.
+- Supported events are `tray_switch`, `hint_used`, `display_used`, and
+  `opened_result`; their result fields must match the retained tray state.
+- Tool and opening events must exactly cover the trays' `tool_used` and
+  `opened` boxes; one box may have at most one tool event before opening.
+- A tray may not repeat session-level `preferences`, `tools`, or
+  `market_values`.
+
+The CLI returns `session_summary`, `tray_reports` keyed by stable tray ID, and
+`actual_events`. Only the active tray receives a requested card plan or timed
+screening; every retained tray remains available for posterior review.
+
+```bash
+python3 scripts/blindbox_solver.py \
+  examples/synthetic-multi-tray-session.json --digits 10
+```
+
+Legacy single-tray JSON remains valid. It is normalized internally as one
+implicit `tray-1` session while preserving the legacy report shape.
+
 ## `model`
 
 ### Complete regular case

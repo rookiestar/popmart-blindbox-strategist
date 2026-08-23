@@ -121,7 +121,7 @@ class DocsContractTests(unittest.TestCase):
         self.assertGreaterEqual(len(examples), 5)
         for path in examples:
             with self.subTest(example=path.name):
-                solver._normalize_state(
+                solver._normalize_session(
                     json.loads(path.read_text(encoding="utf-8"))
                 )
 

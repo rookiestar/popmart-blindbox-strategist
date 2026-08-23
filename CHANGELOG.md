@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added a backward-compatible multi-tray session envelope with stable tray
+  IDs, global tool/draw counters, and an append-only actual-event ledger.
+- Added one report-level session output that preserves independent posterior
+  reports for every retained tray while planning only on the active tray.
+- Added a synthetic three-tray regression covering cross-tray state retention,
+  global draw limits, event consistency, and legacy one-tray normalization.
 - Replaced session-derived regression fixtures with explicitly marked
   synthetic examples while preserving their probability invariants.
 - Removed internal research notes from the public tree.
