@@ -18,15 +18,20 @@ Read only what the current stage needs:
 - `references/preference-strategies.md` when capturing scores, choosing a strategy, or deciding whether to stop.
 - `references/tray-screening.md` when a timed tray must be kept or released.
 - `references/probability-model.md` before running or interpreting the solver.
-- `references/output-templates.md` for market, screening, intake, review, and
-  the standard-report handoff boundary.
+- `references/output-templates.md` for market, calibration, screening, intake,
+  review, and the standard-report handoff boundary.
 - `references/review-and-evals.md` after a real draw or when improving this skill.
 - Run `scripts/blindbox_solver.py` for deterministic tray-level calculations.
 - Run `scripts/qiandao_market_snapshot.py` for the mainland resale fast path.
 
 ## Non-negotiable principles
 
-1. **Make the user's trade-off explicit.** Default to `稳妥避雷`; use scores and hard limits only when supplied. Read `references/preference-strategies.md` for the six user-facing strategies.
+1. **Score first, calibrate second.** Prefer complete per-design scores, derive
+   the seven tiers, and use current-tray metrics to offer concrete
+   boundary choices. A score never mechanically creates a probability limit.
+   Apply this intake to all five guided goals A–E. `保值优先` additionally
+   requires complete, current, same-basis CNY market values.
+   Read `references/preference-strategies.md` for the six user-facing strategies.
 2. **Model the whole tray jointly.** If the tray is a complete no-duplicate case, every box is correlated with every other box. Never calculate each box independently.
 3. **Keep sold-but-unknown boxes latent.** A sold or unavailable box with unknown content remains in the case and constrains the remaining boxes.
 4. **Treat every UI line under “不是” as an exclusion.** Never reverse the meaning of the screenshot.
@@ -65,12 +70,14 @@ preference brief, or asks to be guided step by step.
    choices in one turn.
 5. Select from the existing six user-facing strategies. Do not rename them or
    create a seventh “guided” strategy.
-6. Run a preliminary calculation before asking for a hard-risk limit. Show the
-   real attainable risk and ask whether the user accepts it; never silently
-   apply a fixed probability cap.
-7. Trigger full resale research only for `保值优先`, an explicit market
+6. Trigger full resale research only for `保值优先`, an explicit market
    question, or a factual lineup/mechanics gap that cannot otherwise be
    resolved.
+7. With complete scores—and, for `保值优先`, complete current market
+   values—run `--calibrate-preferences --format markdown` before asking for
+   quality lines. Relay its real attainable ranges and numbered trade-offs
+   unchanged. Before the user selects or edits one, keep quality lines out of
+   `stop_rules` and do not issue a formal draw advice.
 8. Present the decision contract from `references/output-templates.md`. In
    guided mode, continue to the final exact calculation only after the user
    explicitly confirms or corrects it.
@@ -134,8 +141,55 @@ or confirms the Stage 0 decision contract.
    single-tray state to the multi-tray session envelope. Keep preferences,
    remaining tools, and draws used at session level; keep posterior evidence
    inside its originating tray.
+8. For a score-first session, keep only confirmed action limits such as
+   `max_draws` before calibration. Do not copy guessed quality percentages into
+   `stop_rules`.
 
-## Stage 2.5 — Screen a timed tray
+## Stage 2.5 — Calibrate score-first boundaries
+
+Trigger: every regular design has a score, but the strategy's quality lines
+are not yet confirmed, or the user asks to recalibrate them. `保值优先` also
+requires current CNY market values for every regular design.
+
+Run:
+
+```bash
+python3 scripts/blindbox_solver.py <state.json> \
+  --calibrate-preferences --format markdown
+```
+
+The command requires complete scores. Use `score_default` only after the user
+explicitly accepts one common score for every omitted design, then set
+`score_default_confirmed: true`.
+
+Relay stdout unchanged. It auto-derives all seven tiers, shows every drawable
+box and the current attainable ranges, and offers up to three non-dominated
+boundary bundles. For score-derived `只冲最爱`, all `+10` designs form the
+combined primary target; `p_dislike_any` and `p_hard_avoid` calibrate risk.
+For `保值优先`, expected resale value is primary, while expected personal
+score, disliked risk, and hard-avoid risk remain confirmed constraints.
+These are direct-box metrics before new tool outcomes; plan cards only after
+the boundary choice.
+
+The calibration report is not a draw recommendation. Numbered schemes 1/2/3
+are proposals anchored to actual current-tray boxes and stay distinct from the
+guided A–E goal letters. Only after the user chooses a scheme or edits the
+numbers:
+
+1. write the selected quality lines into session-level `stop_rules`; in a
+   multi-tray session, append one `stop_rule_override` per line with old value
+   `null` (or the prior value) and the confirmed choice as reason;
+2. if the chosen strategy is `守住底线`, write the confirmed hard boundary to
+   `hard_avoid_max_pp`;
+3. present the decision contract and obtain confirmation;
+4. continue to screening or the formal decision.
+
+Reuse confirmed boundaries across trays in the same series session. Recalibrate
+after a series change or material score change, not after ordinary clues or one
+unlucky result. If the target is unreachable, create no 0% threshold; switch
+trays or stop.
+
+## Stage 2.6 — Screen a timed tray
 
 Trigger: the user asks whether the currently reserved end/tray is worth
 continuing, or plans to shake and switch ends under a 3–5 minute timer.
@@ -166,6 +220,8 @@ python3 scripts/blindbox_solver.py <state.json> --format markdown
 作为完整答复；不得手工摘要、删节概率矩阵、改写推荐动作或在前后另加一份建议。
 只有命令退出码为 0 且输出了标准报告，正式决策才算完成。若命令失败，修正状态后
 重跑；在成功前不提供手工降级建议。标准报告同时给出条件概率口径和必要模型警告。
+Score-first guidance reaches this stage only after the selected calibration
+bundle and decision contract are explicitly confirmed.
 
 Use these user-facing strategy names:
 
@@ -260,6 +316,8 @@ When the user reports a hint or display result:
 8. Run the Stage 3 Markdown command and 原样转交 stdout. This applies to every
    actual clue, display, and opened-result follow-up before another draw.
 9. Do not let sunk tool cost influence the next choice.
+10. Keep the confirmed score-derived tiers and boundaries. Ordinary clues
+    trigger global recomputation, not a fresh calibration.
 
 ### Short follow-ups
 
@@ -310,6 +368,9 @@ At minimum include:
   was not described as guaranteed improvement.
 - Every formal decision command exited 0 and its stdout was relayed unchanged;
   no partial manual summary replaced the standard report.
+- A score-first session used complete scores; any `score_default` was explicitly
+  confirmed. Before quality-line confirmation, only the calibration report was
+  shown and `stop_rules` was not silently populated.
 - Market claims have current citations and confidence labels.
 - The model report labels probabilities as conditional and exposes
   `regular_only_scope` / `hint_mechanism_assumed` when applicable.

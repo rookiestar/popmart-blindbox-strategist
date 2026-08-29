@@ -14,11 +14,14 @@
 - `max_dislike_any_pp`
 - `max_hard_avoid_pp`
 - `min_expected_score`
+- `min_resale_ev`（仅 `保值优先`，且市场值完整）
 - `守住底线`的 `hard_avoid_max_pp`
 
 `max_draws` 是整轮上限，不是端质量。只有 `max_draws` 时不能判断端型，
-应先补至少一条质量入场线。没有默认摇盒状态的真实分布时，也不能计算
-“下一端一定更好”或理论最优换端次数。
+应先补至少一条质量入场线。已有完整逐款评分时，不让用户凭空估数字；先运行
+`--calibrate-preferences --format markdown`，从当前端真实可达取舍中确认
+边界。候选线在用户选定前不算入场线。没有默认摇盒状态的真实分布时，也不能
+计算“下一端一定更好”或理论最优换端次数。
 
 ## 快速命令
 
@@ -39,7 +42,7 @@ python3 scripts/blindbox_solver.py <state.json> \
 | `switch` | 直接未达线，且一步规划仍选择停止 | 不用卡，换端 |
 | `accepted_review` | 已锁定端后来未达线，原建议会换端 | 先复核；确认后记录释放，再换端 |
 | `session_stop` | 已达到整轮抽盒上限 | 停止整轮；换端无效 |
-| `needs_acceptance_rules` | 没有质量入场线 | 先根据偏好补入场线，不宣称端型好坏 |
+| `needs_acceptance_rules` | 没有已确认质量入场线 | 先做评分校准并确认边界，不宣称端型好坏 |
 
 `tool_dependent`不是直接合格。报告
 `one_card_action.expected_draw_probability`，不要把“存在可救分支”写成高

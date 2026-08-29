@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Added score-first preference calibration: complete per-design scores now
+  derive all seven tiers, while `--calibrate-preferences` reports current-tray
+  attainable ranges, every box's metrics, and non-dominated numbered boundary
+  bundles without issuing a draw recommendation or mutating stop rules.
+- Applied the calibration gate to all guided A–E goals. `保值优先` now requires
+  complete current market values and calibrates expected resale value together
+  with personal-score and risk boundaries.
+- Required explicit confirmation when `score_default` fills omitted designs;
+  confirmed boundary bundles apply within the current series session and are
+  recalibrated after series or material score changes.
+- Made score-derived `只冲最爱` maximize the combined probability of equal
+  highest-score designs, while preserving explicit ordered-liked behavior.
 - Added a validated reader-facing Markdown report with a concise conclusion,
   quantified TOP 3 comparison, full design-by-box probability matrix, every
   configured stop line, next action, and model warnings; JSON remains the

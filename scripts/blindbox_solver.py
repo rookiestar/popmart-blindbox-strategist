@@ -45,7 +45,10 @@ STRATEGY_RULES = {
     "guardrail": "只在硬雷概率不超过上限的盒中选平均评分最高者；若都超线则停止抽盒。",
     "balanced": "直接选择概率加权后的平均评分最高者，高分款可以补偿低分款风险。",
     "target_only": "选择命中任一喜欢款概率最高者，喜欢顺序只用于打破平局。",
-    "top_target_first": "先选择命中第一喜欢款概率最高者，再依次比较其他喜欢款。",
+    "top_target_first": (
+        "逐款评分时先选择所有最高分款的合计概率；显式给出喜欢顺序时，"
+        "再按该顺序逐款比较。"
+    ),
     "resale_ev": "选择概率加权后的预期二手价值最高者。",
 }
 STRATEGY_ALIASES = {
@@ -101,10 +104,38 @@ STOP_RULE_KEYS = {
     "max_dislike_any_pp",
     "max_hard_avoid_pp",
     "min_expected_score",
+    "min_resale_ev",
     "max_draws",
 }
+QUALITY_STOP_RULE_KEYS = (
+    "min_like_any_pp",
+    "min_favorite_any_pp",
+    "min_expected_score",
+    "min_resale_ev",
+    "max_dislike_any_pp",
+    "max_hard_avoid_pp",
+)
 HINT_MECHANISM_TYPES = {"uniform_wrong_label"}
 HINT_MECHANISM_STATUSES = {"assumed", "confirmed"}
+
+SCORE_TIER_LABELS = {
+    "favorite": "最爱",
+    "liked": "喜欢",
+    "acceptable": "可接受",
+    "neutral": "中性",
+    "neutral_disappointed": "中性但失望",
+    "light_dislike": "轻雷",
+    "hard_avoid": "硬雷",
+}
+SCORE_TIER_RANGES = {
+    "favorite": "+10",
+    "liked": "+6～+9",
+    "acceptable": "+1～+5",
+    "neutral": "0",
+    "neutral_disappointed": "-1～-4",
+    "light_dislike": "-5～-8",
+    "hard_avoid": "-9～-10",
+}
 
 
 @dataclass(frozen=True)
@@ -143,6 +174,14 @@ def _stable_box_sort_key(box_id: str) -> Tuple[int, Any]:
         return (0, int(box_id))
     except (TypeError, ValueError):
         return (1, str(box_id))
+
+
+def _bit_count(value: int) -> int:
+    """Count set bits on Python versions before int.bit_count()."""
+    native_bit_count = getattr(value, "bit_count", None)
+    if native_bit_count is not None:
+        return int(native_bit_count())
+    return bin(value).count("1")
 
 
 def _score_tier(score: float) -> str:
@@ -280,6 +319,39 @@ def _normalize_state(raw: Mapping[str, Any]) -> Dict[str, Any]:
     _normalize_hint_mechanism(model)
 
     union_designs = set(d for s in scenarios for d in s.designs)
+    raw_market_values = state.get("market_values", {})
+    if raw_market_values is None:
+        raw_market_values = {}
+    if not isinstance(raw_market_values, Mapping):
+        raise StateError("state.market_values must be an object")
+    market_value_labels = {str(label) for label in raw_market_values}
+    unknown_market_labels = market_value_labels - union_designs
+    if unknown_market_labels:
+        raise StateError(
+            "state.market_values contains unknown designs: "
+            f"{sorted(unknown_market_labels)}"
+        )
+    market_values: Dict[str, float] = {}
+    for label, value in raw_market_values.items():
+        try:
+            market_value = float(value)
+        except (TypeError, ValueError) as exc:
+            raise StateError(
+                f"market value for {label!r} must be numeric"
+            ) from exc
+        if not math.isfinite(market_value) or market_value < 0:
+            raise StateError(
+                f"market value for {label!r} must be finite and non-negative"
+            )
+        market_values[str(label)] = market_value
+    state["market_values"] = market_values
+    state["_market_value_coverage"] = {
+        "total_designs": len(union_designs),
+        "valued_design_count": len(market_values),
+        "complete": set(market_values) == union_designs,
+        "missing_values": sorted(union_designs - set(market_values)),
+        "currency": "CNY",
+    }
     hint_labels = model.get("hint_labels")
     if hint_labels is None:
         # For a regular model, all designs are plausible labels. For a mixture,
@@ -331,11 +403,20 @@ def _normalize_state(raw: Mapping[str, Any]) -> Dict[str, Any]:
             "top_target_first, guardrail, balanced, or resale_ev"
         )
     preferences["strategy"] = STRATEGY_NAMES[preferences["objective_mode"]]
+    if (
+        preferences["objective_mode"] == "resale_ev"
+        and not state["_market_value_coverage"]["complete"]
+    ):
+        raise StateError(
+            "strategy 保值优先 requires current market_values for every design; "
+            f"missing {state['_market_value_coverage']['missing_values']}"
+        )
 
     raw_scores = preferences.get("scores", preferences.get("utility_scores", {}))
     if not isinstance(raw_scores, dict):
         raise StateError("preferences.scores must be an object")
-    unknown_score_labels = set(str(k) for k in raw_scores) - union_designs
+    explicit_score_labels = set(str(k) for k in raw_scores)
+    unknown_score_labels = explicit_score_labels - union_designs
     if unknown_score_labels:
         raise StateError(
             "preferences.scores contains unknown designs: "
@@ -353,6 +434,9 @@ def _normalize_state(raw: Mapping[str, Any]) -> Dict[str, Any]:
         scores[str(label)] = score
 
     score_default_supplied = "score_default" in preferences
+    score_default_confirmed = preferences.get("score_default_confirmed", False)
+    if not isinstance(score_default_confirmed, bool):
+        raise StateError("preferences.score_default_confirmed must be boolean")
     if score_default_supplied:
         try:
             score_default = float(preferences["score_default"])
@@ -460,6 +544,14 @@ def _normalize_state(raw: Mapping[str, Any]) -> Dict[str, Any]:
                 "preferences.stop_rules.min_expected_score must be finite"
             )
         stop_rules["min_expected_score"] = value
+    if "min_resale_ev" in raw_stop_rules:
+        value = float(raw_stop_rules["min_resale_ev"])
+        if not math.isfinite(value) or value < 0:
+            raise StateError(
+                "preferences.stop_rules.min_resale_ev must be finite and "
+                "non-negative"
+            )
+        stop_rules["min_resale_ev"] = value
     if "max_draws" in raw_stop_rules:
         value = int(raw_stop_rules["max_draws"])
         if value < 0:
@@ -477,6 +569,14 @@ def _normalize_state(raw: Mapping[str, Any]) -> Dict[str, Any]:
     if "min_expected_score" in stop_rules and not scores:
         raise StateError(
             "preferences.stop_rules.min_expected_score requires preferences.scores"
+        )
+    if (
+        "min_resale_ev" in stop_rules
+        and not state["_market_value_coverage"]["complete"]
+    ):
+        raise StateError(
+            "preferences.stop_rules.min_resale_ev requires market_values for "
+            "every design"
         )
     preferences["stop_rules"] = stop_rules
 
@@ -517,6 +617,16 @@ def _normalize_state(raw: Mapping[str, Any]) -> Dict[str, Any]:
     state["_scenarios"] = scenarios
     state["_union_designs"] = sorted(union_designs)
     state["_hint_labels"] = hint_labels
+    state["_score_coverage"] = {
+        "total_designs": len(union_designs),
+        "explicit_score_count": len(explicit_score_labels),
+        "scored_design_count": len(scores),
+        "complete": set(scores) == union_designs,
+        "missing_scores": sorted(union_designs - set(scores)),
+        "filled_by_score_default": sorted(set(scores) - explicit_score_labels),
+        "score_default_used": bool(set(scores) - explicit_score_labels),
+        "score_default_confirmed": score_default_confirmed,
+    }
     return state
 
 
@@ -547,9 +657,13 @@ def _normalize_stop_rule_override_value(
         raise StateError(
             f"stop_rule_override {rule} values must be finite"
         )
-    if rule != "min_expected_score" and not 0 <= normalized <= 100:
+    if rule.endswith("_pp") and not 0 <= normalized <= 100:
         raise StateError(
             f"stop_rule_override {rule} values must be between 0 and 100"
+        )
+    if rule == "min_resale_ev" and normalized < 0:
+        raise StateError(
+            "stop_rule_override min_resale_ev values must be non-negative"
         )
     return normalized
 
@@ -929,7 +1043,10 @@ def _scenario_analysis(state: Mapping[str, Any], scenario: Scenario) -> Scenario
 
     ordered_boxes = sorted(
         unknown_boxes,
-        key=lambda b: (candidate_masks[b["id"]].bit_count(), _stable_box_sort_key(b["id"])),
+        key=lambda b: (
+            _bit_count(candidate_masks[b["id"]]),
+            _stable_box_sort_key(b["id"]),
+        ),
     )
     masks = [candidate_masks[b["id"]] for b in ordered_boxes]
     m = len(ordered_boxes)
@@ -1036,6 +1153,22 @@ def _rank_weights(items: Sequence[str]) -> Dict[str, int]:
     return {item: n - i for i, item in enumerate(items)}
 
 
+def _score_derived_target_groups(
+    preferences: Mapping[str, Any],
+) -> List[List[str]]:
+    """Group score-derived liked designs without inventing an order inside ties."""
+    if preferences["preference_sources"]["liked"] != "scores":
+        return []
+    scores = preferences["scores"]
+    grouped: Dict[float, List[str]] = {}
+    for design in preferences["liked"]:
+        grouped.setdefault(float(scores[design]), []).append(design)
+    return [
+        sorted(grouped[score])
+        for score in sorted(grouped, reverse=True)
+    ]
+
+
 def metrics_for_box(
     state: Mapping[str, Any], posterior: PosteriorResult, box_id: str
 ) -> Dict[str, Any]:
@@ -1137,6 +1270,23 @@ def metric_comparison_key(
         return tuple(primary + exact)
 
     if mode == "top_target_first":
+        score_groups = _score_derived_target_groups(prefs)
+        if score_groups:
+            grouped_probabilities = [
+                sum(
+                    float(metrics["liked_probabilities"].get(design, 0.0))
+                    for design in group
+                )
+                for group in score_groups
+            ]
+            primary = [-q(value) for value in grouped_probabilities]
+            primary += [-q(metrics["p_like_any"])]
+            exact = [-value for value in grouped_probabilities]
+            exact += [
+                -float(metrics["p_like_any"]),
+                -float(metrics["liked_weighted_score"]),
+            ]
+            return tuple(primary + exact)
         primary = [-q(metrics["liked_probabilities"].get(d, 0.0)) for d in liked]
         primary += [-q(metrics["p_like_any"])]
         exact = [-float(metrics["liked_probabilities"].get(d, 0.0)) for d in liked]
@@ -1182,7 +1332,13 @@ def metric_comparison_key(
         value = metrics.get("resale_ev")
         if value is None:
             raise StateError("resale_ev objective requires state.market_values")
-        return (-float(value),)
+        expected_score = metrics.get("expected_score")
+        return (
+            -float(value),
+            -float(expected_score) if expected_score is not None else 0.0,
+            float(metrics["p_hard_avoid"]),
+            float(metrics["p_dislike_any"]),
+        )
 
     raise StateError(f"unsupported objective mode: {mode}")
 
@@ -1222,6 +1378,20 @@ def _primary_tool_metric(
     if mode == "target_only":
         return float(metrics["p_like_any"]), "p_like_any"
     if mode == "top_target_first":
+        score_groups = _score_derived_target_groups(prefs)
+        if score_groups:
+            metric_name = (
+                "p_favorite_any"
+                if float(prefs["scores"][score_groups[0][0]]) == 10.0
+                else "p_top_score_group"
+            )
+            return (
+                sum(
+                    float(metrics["liked_probabilities"].get(design, 0.0))
+                    for design in score_groups[0]
+                ),
+                metric_name,
+            )
         top = prefs["liked"][0] if prefs["liked"] else None
         return (
             float(metrics["liked_probabilities"].get(top, 0.0)),
@@ -1864,6 +2034,12 @@ def evaluate_draw_decision(
             f"期望评分 {float(best['expected_score']):.2f} "
             f"低于 {min_score:.2f}"
         )
+    min_resale = stop_rules.get("min_resale_ev")
+    if min_resale is not None and float(best["resale_ev"]) < min_resale:
+        reasons.append(
+            f"预期二手价值 ¥{float(best['resale_ev']):.2f} "
+            f"低于 ¥{min_resale:.2f}"
+        )
 
     if prefs["objective_mode"] == "guardrail":
         hard_limit = float(prefs["hard_avoid_max_pp"])
@@ -1953,6 +2129,21 @@ def _tray_acceptance_profile(
                 "actual": actual,
                 "margin": actual - threshold,
                 "unit": "score",
+                "passed": actual >= threshold,
+            }
+        )
+
+    if "min_resale_ev" in stop_rules:
+        actual = float(best["resale_ev"])
+        threshold = float(stop_rules["min_resale_ev"])
+        checks.append(
+            {
+                "rule": "min_resale_ev",
+                "operator": ">=",
+                "threshold": threshold,
+                "actual": actual,
+                "margin": actual - threshold,
+                "unit": "cny",
                 "passed": actual >= threshold,
             }
         )
@@ -2243,6 +2434,475 @@ def build_report(
     return report
 
 
+def _calibration_primary_spec(
+    state: Mapping[str, Any],
+) -> Dict[str, str]:
+    preferences = state["preferences"]
+    mode = preferences["objective_mode"]
+    if mode == "top_target_first":
+        if preferences["preference_sources"]["liked"] != "scores":
+            raise StateError(
+                "score-first calibration for strategy 只冲最爱 requires "
+                "score-derived liked designs; omit the explicit liked field or "
+                "continue with the legacy ordered-target workflow"
+            )
+        if not preferences["score_tiers"]["favorite"]:
+            raise StateError(
+                "strategy 只冲最爱 requires at least one design scored +10 "
+                "for preference calibration"
+            )
+        return {
+            "metric": "p_favorite_any_pp",
+            "rule": "min_favorite_any_pp",
+            "direction": "max",
+            "label": "最爱款合计",
+        }
+    if mode == "target_only":
+        if not preferences["liked"]:
+            raise StateError(
+                "strategy 随便中个喜欢 requires at least one liked design "
+                "for preference calibration"
+            )
+        return {
+            "metric": "p_like_any_pp",
+            "rule": "min_like_any_pp",
+            "direction": "max",
+            "label": "喜欢款合计",
+        }
+    if mode in {"balanced", "guardrail"}:
+        return {
+            "metric": "expected_score",
+            "rule": "min_expected_score",
+            "direction": "max",
+            "label": "期望评分",
+        }
+    if mode == "risk_first":
+        if preferences["disliked"]:
+            return {
+                "metric": "p_dislike_any_pp",
+                "rule": "max_dislike_any_pp",
+                "direction": "min",
+                "label": "不喜欢款合计",
+            }
+        if preferences["liked"]:
+            return {
+                "metric": "p_like_any_pp",
+                "rule": "min_like_any_pp",
+                "direction": "max",
+                "label": "喜欢款合计",
+            }
+        return {
+            "metric": "expected_score",
+            "rule": "min_expected_score",
+            "direction": "max",
+            "label": "期望评分",
+        }
+    if mode == "resale_ev":
+        coverage = state["_market_value_coverage"]
+        if not coverage["complete"]:
+            raise StateError(
+                "strategy 保值优先 calibration requires current market_values "
+                f"for every design; missing {coverage['missing_values']}"
+            )
+        return {
+            "metric": "resale_ev",
+            "rule": "min_resale_ev",
+            "direction": "max",
+            "label": "预期二手价值",
+        }
+    raise StateError("unsupported strategy for preference calibration")
+
+
+def _calibration_row(
+    metrics: Mapping[str, Any],
+    rank: int,
+    *,
+    include_resale: bool = False,
+) -> Dict[str, Any]:
+    row = {
+        "rank": rank,
+        "box_id": metrics["box_id"],
+        "p_like_any_pp": 100.0 * float(metrics["p_like_any"]),
+        "p_favorite_any_pp": 100.0 * float(metrics["p_favorite_any"]),
+        "p_dislike_any_pp": 100.0 * float(metrics["p_dislike_any"]),
+        "p_hard_avoid_pp": 100.0 * float(metrics["p_hard_avoid"]),
+        "expected_score": float(metrics["expected_score"]),
+    }
+    if include_resale:
+        row["resale_ev"] = float(metrics["resale_ev"])
+    return row
+
+
+def _calibration_dimensions(
+    state: Mapping[str, Any],
+    primary: Mapping[str, str],
+) -> List[Tuple[str, str]]:
+    dimensions = [(primary["metric"], primary["direction"])]
+    preferences = state["preferences"]
+    if (
+        primary["metric"] == "resale_ev"
+        and ("expected_score", "max") not in dimensions
+    ):
+        dimensions.append(("expected_score", "max"))
+    if (
+        preferences["disliked"]
+        and primary["metric"] != "p_dislike_any_pp"
+    ):
+        dimensions.append(("p_dislike_any_pp", "min"))
+    if (
+        preferences["hard_avoid"]
+        and primary["metric"] != "p_hard_avoid_pp"
+    ):
+        dimensions.append(("p_hard_avoid_pp", "min"))
+    return dimensions
+
+
+def _calibration_dominates(
+    candidate: Mapping[str, Any],
+    other: Mapping[str, Any],
+    dimensions: Sequence[Tuple[str, str]],
+) -> bool:
+    no_worse = True
+    strictly_better = False
+    for metric, direction in dimensions:
+        candidate_value = float(candidate[metric])
+        other_value = float(other[metric])
+        if direction == "max":
+            if candidate_value + 1e-12 < other_value:
+                no_worse = False
+            if candidate_value > other_value + 1e-12:
+                strictly_better = True
+        else:
+            if candidate_value > other_value + 1e-12:
+                no_worse = False
+            if candidate_value + 1e-12 < other_value:
+                strictly_better = True
+    return no_worse and strictly_better
+
+
+def _calibration_frontier(
+    rows: Sequence[Mapping[str, Any]],
+    dimensions: Sequence[Tuple[str, str]],
+) -> List[Dict[str, Any]]:
+    unique_rows: List[Mapping[str, Any]] = []
+    signatures: set[Tuple[float, ...]] = set()
+    for row in rows:
+        signature = tuple(round(float(row[metric]), 12) for metric, _ in dimensions)
+        if signature in signatures:
+            continue
+        signatures.add(signature)
+        unique_rows.append(row)
+    return [
+        dict(row)
+        for row in unique_rows
+        if not any(
+            _calibration_dominates(other, row, dimensions)
+            for other in unique_rows
+            if other is not row
+        )
+    ]
+
+
+def _calibration_primary_sort_value(
+    row: Mapping[str, Any],
+    primary: Mapping[str, str],
+) -> float:
+    value = float(row[primary["metric"]])
+    return -value if primary["direction"] == "max" else value
+
+
+def _outward_candidate_threshold(rule: str, actual: float) -> float:
+    if rule == "min_expected_score":
+        return math.floor(actual * 10.0 + 1e-12) / 10.0
+    if rule == "min_resale_ev":
+        return float(math.floor(actual + 1e-12))
+    if rule.startswith("min_"):
+        return float(math.floor(actual + 1e-12))
+    return float(math.ceil(actual - 1e-12))
+
+
+def _calibration_candidate_rules(
+    row: Mapping[str, Any],
+    state: Mapping[str, Any],
+    primary: Mapping[str, str],
+) -> Dict[str, float]:
+    metric_by_rule = {
+        "min_like_any_pp": "p_like_any_pp",
+        "min_favorite_any_pp": "p_favorite_any_pp",
+        "max_dislike_any_pp": "p_dislike_any_pp",
+        "max_hard_avoid_pp": "p_hard_avoid_pp",
+        "min_expected_score": "expected_score",
+        "min_resale_ev": "resale_ev",
+    }
+    requested_rules = [primary["rule"]]
+    if primary["metric"] == "resale_ev":
+        requested_rules.append("min_expected_score")
+    if state["preferences"]["disliked"]:
+        requested_rules.append("max_dislike_any_pp")
+    if state["preferences"]["hard_avoid"]:
+        requested_rules.append("max_hard_avoid_pp")
+    rules: Dict[str, float] = {}
+    for rule in QUALITY_STOP_RULE_KEYS:
+        if rule not in requested_rules:
+            continue
+        actual = float(row[metric_by_rule[rule]])
+        rules[rule] = _outward_candidate_threshold(rule, actual)
+    return rules
+
+
+def _calibration_choices(
+    frontier: Sequence[Mapping[str, Any]],
+    state: Mapping[str, Any],
+    primary: Mapping[str, str],
+) -> List[Dict[str, Any]]:
+    if not frontier:
+        return []
+    preferences = state["preferences"]
+    primary_labels = {
+        "p_favorite_any_pp": "最爱优先",
+        "p_like_any_pp": "喜欢优先",
+        "p_dislike_any_pp": "总雷最低",
+        "expected_score": "评分优先",
+        "resale_ev": "保值优先",
+    }
+    selectors: List[Tuple[str, Any]] = [
+        (
+            primary_labels[primary["metric"]],
+            lambda row: (
+                _calibration_primary_sort_value(row, primary),
+                float(row["p_hard_avoid_pp"]),
+                float(row["p_dislike_any_pp"]),
+                -float(row["expected_score"]),
+                _stable_box_sort_key(row["box_id"]),
+            ),
+        )
+    ]
+    if (
+        preferences["hard_avoid"]
+        and primary["metric"] != "p_hard_avoid_pp"
+    ):
+        selectors.append(
+            (
+                "硬雷最低",
+                lambda row: (
+                    float(row["p_hard_avoid_pp"]),
+                    _calibration_primary_sort_value(row, primary),
+                    float(row["p_dislike_any_pp"]),
+                    -float(row["expected_score"]),
+                    _stable_box_sort_key(row["box_id"]),
+                ),
+            )
+        )
+    if (
+        preferences["disliked"]
+        and primary["metric"] != "p_dislike_any_pp"
+    ):
+        selectors.append(
+            (
+                "总雷最低",
+                lambda row: (
+                    float(row["p_dislike_any_pp"]),
+                    _calibration_primary_sort_value(row, primary),
+                    float(row["p_hard_avoid_pp"]),
+                    -float(row["expected_score"]),
+                    _stable_box_sort_key(row["box_id"]),
+                ),
+            )
+        )
+
+    selected: List[Tuple[str, Mapping[str, Any]]] = []
+    selected_box_ids: set[str] = set()
+    for label, sort_key in selectors:
+        row = min(frontier, key=sort_key)
+        box_id = str(row["box_id"])
+        if box_id in selected_box_ids:
+            continue
+        selected_box_ids.add(box_id)
+        selected.append((label, row))
+
+    goal_row = selected[0][1]
+    choices: List[Dict[str, Any]] = []
+    for index, (label, row) in enumerate(selected):
+        metric_keys = [
+            "p_favorite_any_pp",
+            "p_like_any_pp",
+            "p_dislike_any_pp",
+            "p_hard_avoid_pp",
+            "expected_score",
+        ]
+        if row.get("resale_ev") is not None:
+            metric_keys.append("resale_ev")
+        choices.append(
+            {
+                "choice": str(index + 1),
+                "orientation": label,
+                "box_id": row["box_id"],
+                "actual": {
+                    key: row[key] for key in metric_keys
+                },
+                "tradeoff_vs_goal_choice": {
+                    "favorite_delta_pp": (
+                        float(row["p_favorite_any_pp"])
+                        - float(goal_row["p_favorite_any_pp"])
+                    ),
+                    "like_delta_pp": (
+                        float(row["p_like_any_pp"])
+                        - float(goal_row["p_like_any_pp"])
+                    ),
+                    "dislike_reduction_pp": (
+                        float(goal_row["p_dislike_any_pp"])
+                        - float(row["p_dislike_any_pp"])
+                    ),
+                    "hard_avoid_reduction_pp": (
+                        float(goal_row["p_hard_avoid_pp"])
+                        - float(row["p_hard_avoid_pp"])
+                    ),
+                    "expected_score_delta": (
+                        float(row["expected_score"])
+                        - float(goal_row["expected_score"])
+                    ),
+                    "resale_reduction_cny": (
+                        None
+                        if row.get("resale_ev") is None
+                        else (
+                            float(goal_row["resale_ev"])
+                            - float(row["resale_ev"])
+                        )
+                    ),
+                },
+                "suggested_stop_rules": _calibration_candidate_rules(
+                    row,
+                    state,
+                    primary,
+                ),
+            }
+        )
+    return choices
+
+
+def build_preference_calibration_report(
+    state: Mapping[str, Any],
+    *,
+    tray_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a score-first boundary calibration without a draw recommendation."""
+    coverage = copy.deepcopy(state["_score_coverage"])
+    if not coverage["complete"]:
+        raise StateError(
+            "preference calibration requires every design to have a score; "
+            f"missing {coverage['missing_scores']}. Give every design a score, "
+            "or use score_default only after the user confirms one shared score."
+        )
+    if coverage["score_default_used"] and not coverage["score_default_confirmed"]:
+        raise StateError(
+            "preference calibration requires "
+            "preferences.score_default_confirmed=true when score_default fills "
+            "unlisted designs"
+        )
+
+    primary = _calibration_primary_spec(state)
+    base_report = build_report(state)
+    rows = [
+        _calibration_row(
+            metrics,
+            rank,
+            include_resale=primary["metric"] == "resale_ev",
+        )
+        for rank, metrics in enumerate(base_report["ranking"], start=1)
+    ]
+    dimensions = _calibration_dimensions(state, primary)
+    frontier = _calibration_frontier(rows, dimensions)
+    frontier_ids = {str(row["box_id"]) for row in frontier}
+    for row in rows:
+        row["pareto_frontier"] = str(row["box_id"]) in frontier_ids
+
+    ranges = {
+        metric: {
+            "min": min(float(row[metric]) for row in rows),
+            "max": max(float(row[metric]) for row in rows),
+        }
+        for metric in [
+            "p_favorite_any_pp",
+            "p_like_any_pp",
+            "p_dislike_any_pp",
+            "p_hard_avoid_pp",
+            "expected_score",
+            *(
+                ["resale_ev"]
+                if primary["metric"] == "resale_ev"
+                else []
+            ),
+        ]
+    }
+    target_unreachable = (
+        primary["direction"] == "max"
+        and primary["metric"] in {
+            "p_favorite_any_pp",
+            "p_like_any_pp",
+            "resale_ev",
+        }
+        and ranges[primary["metric"]]["max"] <= 1e-12
+    )
+    choices = (
+        []
+        if target_unreachable
+        else _calibration_choices(frontier, state, primary)
+    )
+    existing_stop_rules = copy.deepcopy(state["preferences"]["stop_rules"])
+    if coverage["score_default_used"]:
+        coverage["score_default"] = state["preferences"]["score_default"]
+
+    return {
+        "report_type": "preference_calibration",
+        "series": state.get("series"),
+        "tray_id": tray_id,
+        "status": (
+            "target_unreachable"
+            if target_unreachable
+            else "needs_confirmation"
+        ),
+        "strategy_name": state["preferences"]["strategy"],
+        "strategy_rule": STRATEGY_RULES[
+            state["preferences"]["objective_mode"]
+        ],
+        "scope": {
+            "evidence": "current_active_tray",
+            "box_metrics": "direct_drawable_boxes_before_new_tools",
+            "confirmed_rules_apply_to": "current_series_session",
+            "recalibrate_when": [
+                "series_changes",
+                "scores_change_materially",
+            ],
+        },
+        "score_coverage": coverage,
+        "market_value_coverage": copy.deepcopy(
+            state["_market_value_coverage"]
+        ),
+        "scores": copy.deepcopy(state["preferences"]["scores"]),
+        "score_tiers": copy.deepcopy(
+            state["preferences"]["score_tiers"]
+        ),
+        "primary_metric": primary,
+        "attainable_ranges": ranges,
+        "all_boxes": rows,
+        "pareto_box_ids": [
+            row["box_id"]
+            for row in frontier
+        ],
+        "choices": choices,
+        "existing_stop_rules": existing_stop_rules,
+        "stop_rules_mutated": False,
+        "confirmation_required": True,
+        "candidate_rounding": {
+            "probability_pp": "outward_to_whole_percentage_point",
+            "expected_score": "outward_to_one_decimal",
+            "resale_ev": "outward_to_whole_cny",
+        },
+        "model_summary": base_report["model_summary"],
+        "model_warnings": base_report["model_warnings"],
+    }
+
+
 def build_session_report(
     session: Mapping[str, Any],
     include_plan: bool = False,
@@ -2382,9 +3042,159 @@ REPORT_RULE_LABELS = {
     "max_dislike_any_pp": "不喜欢款不超过",
     "max_hard_avoid_pp": "硬雷不超过",
     "min_expected_score": "期望评分至少",
+    "min_resale_ev": "预期二手价值至少",
     "max_draws": "最多抽盒数",
     "hard_avoid_max_pp": "策略硬雷上限",
 }
+
+
+def validate_preference_calibration_report(
+    report: Mapping[str, Any],
+) -> None:
+    errors: List[str] = []
+    if report.get("report_type") != "preference_calibration":
+        errors.append("report type")
+    if report.get("status") not in {
+        "needs_confirmation",
+        "target_unreachable",
+    }:
+        errors.append("status")
+    if report.get("stop_rules_mutated") is not False:
+        errors.append("stop rules were mutated")
+    if report.get("confirmation_required") is not True:
+        errors.append("confirmation gate")
+    coverage = report.get("score_coverage")
+    if not isinstance(coverage, Mapping) or coverage.get("complete") is not True:
+        errors.append("score coverage")
+    primary_metric = report.get("primary_metric")
+    primary_rule = (
+        primary_metric.get("rule")
+        if isinstance(primary_metric, Mapping)
+        else None
+    )
+    if not primary_rule:
+        errors.append("primary calibration rule")
+    if (
+        isinstance(primary_metric, Mapping)
+        and primary_metric.get("metric") == "resale_ev"
+    ):
+        market_coverage = report.get("market_value_coverage")
+        if (
+            not isinstance(market_coverage, Mapping)
+            or market_coverage.get("complete") is not True
+            or market_coverage.get("currency") != "CNY"
+        ):
+            errors.append("market value coverage")
+    rows = report.get("all_boxes")
+    if not isinstance(rows, list) or not rows:
+        errors.append("box metrics")
+        rows = []
+    rows_by_id = {
+        str(row.get("box_id")): row
+        for row in rows
+        if isinstance(row, Mapping)
+    }
+    choices = report.get("choices")
+    if not isinstance(choices, list):
+        errors.append("calibration choices")
+        choices = []
+    if report.get("status") == "needs_confirmation" and not choices:
+        errors.append("calibration choices")
+    if report.get("status") == "target_unreachable" and choices:
+        errors.append("unreachable target choices")
+    forbidden_keys = {
+        "draw_decision",
+        "next_tool_plan",
+        "session_recommendation",
+        "tray_screening",
+    }
+    if forbidden_keys & set(report):
+        errors.append("formal recommendation leaked")
+
+    actual_metric_by_rule = {
+        "min_like_any_pp": "p_like_any_pp",
+        "min_favorite_any_pp": "p_favorite_any_pp",
+        "max_dislike_any_pp": "p_dislike_any_pp",
+        "max_hard_avoid_pp": "p_hard_avoid_pp",
+        "min_expected_score": "expected_score",
+        "min_resale_ev": "resale_ev",
+    }
+    seen_choices: set[str] = set()
+    seen_boxes: set[str] = set()
+    for choice in choices:
+        if not isinstance(choice, Mapping):
+            errors.append("calibration choice shape")
+            continue
+        choice_id = str(choice.get("choice", ""))
+        box_id = str(choice.get("box_id", ""))
+        if (
+            not choice_id
+            or choice_id in seen_choices
+            or box_id in seen_boxes
+            or box_id not in rows_by_id
+        ):
+            errors.append("calibration choice identity")
+        seen_choices.add(choice_id)
+        seen_boxes.add(box_id)
+        actual = choice.get("actual")
+        suggested = choice.get("suggested_stop_rules")
+        if not isinstance(actual, Mapping) or not isinstance(
+            suggested, Mapping
+        ):
+            errors.append("candidate boundaries")
+            continue
+        source_row = rows_by_id.get(box_id)
+        if source_row is not None:
+            if source_row.get("pareto_frontier") is not True:
+                errors.append("candidate outside frontier")
+            for metric in (
+                "p_favorite_any_pp",
+                "p_like_any_pp",
+                "p_dislike_any_pp",
+                "p_hard_avoid_pp",
+                "expected_score",
+            ):
+                if metric not in actual or not _numbers_match(
+                    actual[metric],
+                    source_row.get(metric),
+                ):
+                    errors.append("candidate actual metrics")
+            if source_row.get("resale_ev") is not None and (
+                "resale_ev" not in actual
+                or not _numbers_match(
+                    actual["resale_ev"],
+                    source_row.get("resale_ev"),
+                )
+            ):
+                errors.append("candidate resale metrics")
+        if not set(suggested).issubset(QUALITY_STOP_RULE_KEYS):
+            errors.append("candidate rule scope")
+            continue
+        if primary_rule not in suggested:
+            errors.append("candidate primary boundary")
+        if primary_rule == "min_resale_ev" and "min_expected_score" not in suggested:
+            errors.append("resale preference boundary")
+        for rule, threshold in suggested.items():
+            metric = actual_metric_by_rule[rule]
+            try:
+                actual_value = float(actual[metric])
+                boundary = float(threshold)
+            except (KeyError, TypeError, ValueError):
+                errors.append("candidate boundary value")
+                continue
+            passed = (
+                actual_value + 1e-12 >= boundary
+                if rule.startswith("min_")
+                else actual_value <= boundary + 1e-12
+            )
+            if not passed:
+                errors.append("candidate boundary excludes source box")
+
+    if errors:
+        raise StateError(
+            "preference calibration validation failed: "
+            + "; ".join(sorted(set(errors)))
+        )
 
 
 def _active_user_report(
@@ -2755,6 +3565,7 @@ def validate_user_report(
         "hard_avoid_max_pp": 100.0
         * float(best.get("p_hard_avoid", 0.0)),
         "min_expected_score": best.get("expected_score"),
+        "min_resale_ev": best.get("resale_ev"),
         "max_draws": draw_decision.get("opened_count"),
     }
     expected_thresholds = dict(stop_rules)
@@ -2768,6 +3579,7 @@ def validate_user_report(
         "max_dislike_any_pp": "<=",
         "max_hard_avoid_pp": "<=",
         "min_expected_score": ">=",
+        "min_resale_ev": ">=",
         "max_draws": "<",
         "hard_avoid_max_pp": "<=",
     }
@@ -2888,6 +3700,8 @@ def _stop_rule_value_text(rule: str, value: Any) -> str:
         return f"{int(value)}盒"
     if rule == "min_expected_score":
         return f"{float(value):.2f}"
+    if rule == "min_resale_ev":
+        return f"¥{float(value):.2f}"
     return str(value)
 
 
@@ -2960,15 +3774,41 @@ def _strategy_comparison_sentence(
         second_value = 100.0 * float(second["p_like_any"])
         suffix = "%"
     elif mode == "top_target_first":
-        liked = report["preference_summary"]["liked"]
-        target = liked[0] if liked else "第一喜欢款"
-        label = target
-        first_value = 100.0 * float(
-            first["liked_probabilities"].get(target, 0.0)
+        preference_summary = report["preference_summary"]
+        liked = preference_summary["liked"]
+        score_groups = _score_derived_target_groups(
+            {
+                "liked": liked,
+                "scores": preference_summary["scores"],
+                "preference_sources": preference_summary["sources"],
+            }
         )
-        second_value = 100.0 * float(
-            second["liked_probabilities"].get(target, 0.0)
-        )
+        if (
+            score_groups
+            and float(preference_summary["scores"][score_groups[0][0]]) == 10.0
+        ):
+            label = "最爱款合计"
+            first_value = 100.0 * float(first["p_favorite_any"])
+            second_value = 100.0 * float(second["p_favorite_any"])
+        elif score_groups:
+            label = "最高评分款合计"
+            first_value = 100.0 * sum(
+                float(first["liked_probabilities"].get(design, 0.0))
+                for design in score_groups[0]
+            )
+            second_value = 100.0 * sum(
+                float(second["liked_probabilities"].get(design, 0.0))
+                for design in score_groups[0]
+            )
+        else:
+            target = liked[0] if liked else "第一喜欢款"
+            label = target
+            first_value = 100.0 * float(
+                first["liked_probabilities"].get(target, 0.0)
+            )
+            second_value = 100.0 * float(
+                second["liked_probabilities"].get(target, 0.0)
+            )
         suffix = "%"
         secondary = (
             f"，任一喜欢款 {_percent(first['p_like_any'])} vs "
@@ -3194,6 +4034,11 @@ def _render_stop_lines(checks: Sequence[Mapping[str, Any]]) -> List[str]:
             threshold = (
                 f"{check['operator']} {int(check['threshold'])}盒"
             )
+        elif unit == "cny":
+            actual = f"¥{float(check['actual']):.2f}"
+            threshold = (
+                f"{check['operator']} ¥{float(check['threshold']):.2f}"
+            )
         else:
             actual = f"{float(check['actual']):.2f}"
             threshold = (
@@ -3319,6 +4164,235 @@ def _render_screening_markdown(
     )
     for warning in report.get("model_warnings", []):
         lines.append(f"- {_reader_warning_message(warning)}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _calibration_rules_text(rules: Mapping[str, Any]) -> str:
+    parts: List[str] = []
+    rule_order = list(QUALITY_STOP_RULE_KEYS)
+    if "min_resale_ev" in rules:
+        rule_order.remove("min_resale_ev")
+        rule_order.insert(0, "min_resale_ev")
+    for rule in rule_order:
+        if rule not in rules:
+            continue
+        value = rules[rule]
+        if rule == "min_expected_score":
+            rendered = f"{float(value):.1f}"
+        elif rule == "min_resale_ev":
+            rendered = f"¥{float(value):.0f}"
+        else:
+            rendered = f"{float(value):.0f}%"
+        operator = "≥" if rule.startswith("min_") else "≤"
+        parts.append(
+            f"{REPORT_RULE_LABELS[rule].replace('至少', '').replace('不超过', '').strip()}"
+            f"{operator}{rendered}"
+        )
+    return "；".join(parts) if parts else "无"
+
+
+def render_preference_calibration_markdown(
+    report: Mapping[str, Any],
+) -> str:
+    """Render score tiers and current-tray trade-offs without recommending a draw."""
+    validate_preference_calibration_report(report)
+    lines = [
+        f"# {_markdown_cell(report.get('series') or '盲盒')}｜偏好校准",
+        "",
+    ]
+    if report.get("tray_id") is not None:
+        lines.extend(
+            [f"当前端：{_markdown_cell(report['tray_id'])}", ""]
+        )
+    if report["status"] == "target_unreachable":
+        conclusion = (
+            f"当前端所有可选盒的{report['primary_metric']['label']}均为 0，"
+            "无法生成有效候选边界；"
+            "本报告未推荐抽盒，也未改写停止线。"
+        )
+    else:
+        conclusion = (
+            "已按逐款评分自动分档，并算出当前端的真实可达取舍；"
+            "本报告未推荐抽盒，也未改写停止线。"
+        )
+    lines.extend(["## 结论", "", conclusion, "", "## 自动分档", ""])
+    lines.extend(
+        [
+            "| 档位 | 分数 | 款式 |",
+            "|---|---:|---|",
+        ]
+    )
+    for tier in SCORE_TIER_KEYS:
+        designs = report["score_tiers"][tier]
+        design_text = "、".join(_markdown_cell(item) for item in designs) or "—"
+        lines.append(
+            f"| {SCORE_TIER_LABELS[tier]} | {SCORE_TIER_RANGES[tier]} | "
+            f"{design_text} |"
+        )
+    coverage = report["score_coverage"]
+    lines.extend(
+        [
+            "",
+            (
+                f"评分覆盖：{coverage['scored_design_count']}/"
+                f"{coverage['total_designs']} 款。"
+            ),
+        ]
+    )
+    if coverage["score_default_used"]:
+        lines.append(
+            f"`score_default={float(coverage['score_default']):g}` 已补齐 "
+            f"{len(coverage['filled_by_score_default'])} 款，且状态标记为用户已确认。"
+        )
+
+    ranges = report["attainable_ranges"]
+    lines.extend(
+        [
+            "",
+            "## 当前端可达区间",
+            "",
+            "以下区间基于当前直接可选盒；卡片在边界确认后另行规划。",
+            "",
+            "| 指标 | 最低 | 最高 |",
+            "|---|---:|---:|",
+            (
+                "| 最爱款合计 | "
+                f"{_pp(ranges['p_favorite_any_pp']['min'])} | "
+                f"{_pp(ranges['p_favorite_any_pp']['max'])} |"
+            ),
+            (
+                "| 喜欢款合计 | "
+                f"{_pp(ranges['p_like_any_pp']['min'])} | "
+                f"{_pp(ranges['p_like_any_pp']['max'])} |"
+            ),
+            (
+                "| 不喜欢款合计 | "
+                f"{_pp(ranges['p_dislike_any_pp']['min'])} | "
+                f"{_pp(ranges['p_dislike_any_pp']['max'])} |"
+            ),
+            (
+                "| 硬雷合计 | "
+                f"{_pp(ranges['p_hard_avoid_pp']['min'])} | "
+                f"{_pp(ranges['p_hard_avoid_pp']['max'])} |"
+            ),
+            (
+                "| 期望评分 | "
+                f"{float(ranges['expected_score']['min']):.2f} | "
+                f"{float(ranges['expected_score']['max']):.2f} |"
+            ),
+        ]
+    )
+    if "resale_ev" in ranges:
+        lines.append(
+            "| 预期二手价值 | "
+            f"¥{float(ranges['resale_ev']['min']):.2f} | "
+            f"¥{float(ranges['resale_ev']['max']):.2f} |"
+        )
+
+    resale_active = "resale_ev" in ranges
+    lines.extend(["", "## 全部可选盒", ""])
+    if resale_active:
+        lines.extend(
+            [
+                "| 当前策略排名 | 盒号 | 最爱 | 喜欢 | 不喜欢 | 硬雷 | 期望评分 | 预期二手价值 | 未被全面压过 |",
+                "|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "| 当前策略排名 | 盒号 | 最爱 | 喜欢 | 不喜欢 | 硬雷 | 期望评分 | 未被全面压过 |",
+                "|---:|---:|---:|---:|---:|---:|---:|---|",
+            ]
+        )
+    for row in report["all_boxes"]:
+        cells = [
+            str(int(row["rank"])),
+            f"{_markdown_cell(row['box_id'])}号",
+            _pp(row["p_favorite_any_pp"]),
+            _pp(row["p_like_any_pp"]),
+            _pp(row["p_dislike_any_pp"]),
+            _pp(row["p_hard_avoid_pp"]),
+            f"{float(row['expected_score']):.2f}",
+        ]
+        if resale_active:
+            cells.append(f"¥{float(row['resale_ev']):.2f}")
+        cells.append("是" if row["pareto_frontier"] else "否")
+        lines.append("| " + " | ".join(cells) + " |")
+
+    lines.extend(["", "## 候选边界", ""])
+    if report["status"] == "target_unreachable":
+        lines.append(
+            "当前端目标不可达；请换端或停止，不生成数值为 0 的伪门槛。"
+        )
+    else:
+        header = (
+            "| 方案 | 取向 | 参考盒 | 最爱 | 喜欢 | 不喜欢 | 硬雷 | "
+            "期望评分 | "
+            + ("预期二手价值 | " if resale_active else "")
+            + "确认后写入 |"
+        )
+        separator = (
+            "|---|---|---:|---:|---:|---:|---:|---:|"
+            + ("---:|" if resale_active else "")
+            + "---|"
+        )
+        lines.extend([header, separator])
+        for choice in report["choices"]:
+            actual = choice["actual"]
+            cells = [
+                f"方案{choice['choice']}",
+                str(choice["orientation"]),
+                f"{_markdown_cell(choice['box_id'])}号",
+                _pp(actual["p_favorite_any_pp"]),
+                _pp(actual["p_like_any_pp"]),
+                _pp(actual["p_dislike_any_pp"]),
+                _pp(actual["p_hard_avoid_pp"]),
+                f"{float(actual['expected_score']):.2f}",
+            ]
+            if resale_active:
+                cells.append(f"¥{float(actual['resale_ev']):.2f}")
+            cells.append(
+                _calibration_rules_text(choice["suggested_stop_rules"])
+            )
+            lines.append("| " + " | ".join(cells) + " |")
+        lines.extend(
+            [
+                "",
+                "候选边界按当前参考盒向“仍可通过”的方向取整；它们是待确认建议，"
+                "不是由评分机械推导出的事实。",
+            ]
+        )
+
+    existing = report["existing_stop_rules"]
+    if existing:
+        existing_parts: List[str] = []
+        quality_text = _calibration_rules_text(existing)
+        if quality_text != "无":
+            existing_parts.append(quality_text)
+        if "max_draws" in existing:
+            existing_parts.append(
+                f"最多抽 {int(existing['max_draws'])} 盒"
+            )
+        lines.extend(
+            [
+                "",
+                f"已有停止条件：{'；'.join(existing_parts)}。本报告未改写。",
+            ]
+        )
+    lines.extend(["", "## 下一步", ""])
+    if report["status"] == "target_unreachable":
+        lines.append("换端后用同一评分重新校准；同系列评分不变时无需重填。")
+    else:
+        choice_ids = "/".join(
+            f"方案{choice['choice']}" for choice in report["choices"]
+        )
+        lines.append(
+            f"回复 {choice_ids} 即确认该组边界用于本系列当前会话；"
+            "也可直接修改数字。确认后才写入 `stop_rules` 并生成正式抽盒建议。"
+        )
+    lines.extend(["", "## 模型口径", ""])
+    lines.extend(_render_model_notes(report))
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -3486,6 +4560,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--calibrate-preferences",
+        action="store_true",
+        help=(
+            "Use complete per-design scores to show current-tray attainable "
+            "ranges and candidate stop-rule bundles without recommending a draw"
+        ),
+    )
+    parser.add_argument(
         "--top-actions",
         type=int,
         default=3,
@@ -3533,35 +4615,62 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         session = _normalize_session(_read_json(args.state))
         if args.plan_one and args.plan_depth not in {None, 1}:
             raise StateError("--plan-one cannot be combined with --plan-depth 2")
+        if args.calibrate_preferences and (
+            args.plan_one
+            or args.plan_depth is not None
+            or args.screen_tray
+        ):
+            raise StateError(
+                "--calibrate-preferences cannot be combined with planning or "
+                "--screen-tray"
+            )
         requested_depth = 1 if args.plan_one else args.plan_depth
-        if args.format == "markdown" and requested_depth is None:
+        if (
+            args.format == "markdown"
+            and requested_depth is None
+            and not args.calibrate_preferences
+        ):
             requested_depth = 1
-        if session["_legacy_input"]:
-            state = session["_tray_states"][session["active_tray_id"]]
-            report = build_report(
+        if args.calibrate_preferences:
+            active_tray_id = session["active_tray_id"]
+            state = session["_tray_states"][active_tray_id]
+            report = build_preference_calibration_report(
                 state,
-                plan_depth=requested_depth,
-                screen_tray=args.screen_tray,
-                beam_width=args.beam_width,
+                tray_id=(
+                    None
+                    if session["_legacy_input"]
+                    else active_tray_id
+                ),
             )
+            if args.format == "markdown":
+                markdown = render_preference_calibration_markdown(report)
         else:
-            report = build_session_report(
-                session,
-                plan_depth=requested_depth,
-                screen_tray=args.screen_tray,
-                beam_width=args.beam_width,
-            )
-        if args.format == "markdown":
-            markdown = render_user_markdown(
-                report,
-                screen_tray=args.screen_tray,
-            )
-        else:
-            report = _slim_report(
-                report,
-                args.top_actions,
-                args.full_branches,
-            )
+            if session["_legacy_input"]:
+                state = session["_tray_states"][session["active_tray_id"]]
+                report = build_report(
+                    state,
+                    plan_depth=requested_depth,
+                    screen_tray=args.screen_tray,
+                    beam_width=args.beam_width,
+                )
+            else:
+                report = build_session_report(
+                    session,
+                    plan_depth=requested_depth,
+                    screen_tray=args.screen_tray,
+                    beam_width=args.beam_width,
+                )
+            if args.format == "markdown":
+                markdown = render_user_markdown(
+                    report,
+                    screen_tray=args.screen_tray,
+                )
+            else:
+                report = _slim_report(
+                    report,
+                    args.top_actions,
+                    args.full_branches,
+                )
     except (OSError, json.JSONDecodeError, StateError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False, indent=2), file=sys.stderr)
         return 2

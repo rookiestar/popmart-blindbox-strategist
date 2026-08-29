@@ -105,9 +105,11 @@ After the result, ask or infer only when evidence is clear:
 - Does the user care about resale value only for neutral/disliked outcomes?
 - Is avoiding the top disliked design a hard constraint or merely a strong preference?
 
-For future runs, capture `硬雷 / 轻雷 / 中性但失望 / 可接受 / 喜欢 /
-最爱`, then add per-design scores when a boundary decision is sensitive to
-how far apart the designs feel. Read `references/preference-strategies.md`.
+For future runs, capture complete per-design scores first and derive
+`硬雷 / 轻雷 / 中性但失望 / 可接受 / 喜欢 / 最爱`. Re-run current-tray
+preference calibration when scores materially change. Do not infer a new
+probability boundary from one realized result. Read
+`references/preference-strategies.md`.
 
 ## 4. Skill-change decision
 
@@ -276,6 +278,20 @@ state transition or preserved requirements, then reach the same complete user
 report without requiring the user to ask for “所有选项”. Before release, also
 give an independent Agent only this Skill, a synthetic prior state, and one
 short update; its reply must be the validated report without a manual wrapper.
+
+### E23 — Score-first preference calibration
+
+`--calibrate-preferences` requires complete scores, derives all seven tiers,
+and requires `score_default_confirmed: true` when a default fills designs. It
+shows current-tray attainable ranges, every drawable box, the non-dominated
+frontier, and concrete candidate boundary bundles. The calibration output has
+no draw/card recommendation, leaves `stop_rules` unchanged, and requires user
+confirmation before a bundle is written. Score-derived `只冲最爱` uses the
+combined probability of equal `+10` designs; explicit ordered targets remain a
+backward-compatible non-calibration path. Exercise every guided A–E goal.
+`保值优先` must fail closed on incomplete market coverage and, when complete,
+add expected resale value plus `min_resale_ev`, personal-score, and risk
+boundaries. Numbered calibration schemes must not reuse the A–E goal letters.
 
 ## 7. Review output template
 

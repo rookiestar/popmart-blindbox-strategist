@@ -11,12 +11,8 @@
   },
   "boxes": [],
   "preferences": {
-    "liked": [],
-    "disliked": [],
     "strategy": "稳妥避雷",
     "scores": {},
-    "score_default": 0,
-    "hard_avoid": [],
     "hard_avoid_max_pp": null,
     "stop_rules": {},
     "tie_tolerance_pp": 0.5

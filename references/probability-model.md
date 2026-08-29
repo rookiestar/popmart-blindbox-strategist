@@ -85,12 +85,44 @@ The solver implements:
   \(\sum_d P(d\mid E)\times score(d)\). Positive and negative outcomes may
   compensate each other.
 - `随便中个喜欢`: maximize total liked probability.
-- `只冲最爱`: compare liked-design probabilities in stated order.
+- `只冲最爱`: with score-derived preferences, maximize each equal-score target
+  group from highest score downward, so all `+10` designs are combined first.
+  With an explicit ordered `liked` list, retain one-design-at-a-time legacy
+  comparison.
 - `保值优先`: maximize probability-weighted resale value.
 
 `tie_tolerance_pp` prevents immaterial probability differences from
 dominating rank-based objectives. Scoring objectives compare expected scores
 directly.
+
+### Score-first boundary calibration
+
+`--calibrate-preferences` computes box metrics with no new quality stop rules
+and emits no draw or card recommendation. For `只冲最爱`, a box is dominated
+when another drawable box has at least as much combined `+10` probability, no
+more total disliked probability, and no more hard-avoid probability, with at
+least one strict improvement. Equivalent metric rows collapse to one stable
+box ID.
+
+The report keeps every box but derives transparent candidates from the
+non-dominated frontier:
+
+- highest primary target;
+- lowest hard-avoid risk, when hard avoids exist;
+- lowest total disliked risk, when disliked designs exist.
+
+All guided A–E goals use this gate. For `保值优先`, the frontier also maximizes
+probability-weighted expected resale value and personal expected score.
+Calibration requires complete current CNY `market_values`; each numbered
+scheme proposes `min_resale_ev`, `min_expected_score`, and any applicable
+disliked/hard-avoid boundaries.
+
+Candidate minimum probabilities round down to a whole percentage point;
+candidate maximum probabilities round up, expected scores round down to one
+decimal, and expected resale values round down to whole CNY. This guarantees
+the reference box still passes but does not make the boundary a statistical
+fact. The user must confirm scheme 1/2/3 or edit it before it enters
+`stop_rules`.
 
 ## 6. Hint-card model
 
