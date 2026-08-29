@@ -69,6 +69,15 @@ def session_lock_fixture():
     return json.loads(fixture.read_text(encoding="utf-8"))
 
 
+def score_calibration_fixture():
+    fixture = (
+        MODULE_PATH.parents[1]
+        / "examples"
+        / "synthetic-score-first-calibration.json"
+    )
+    return json.loads(fixture.read_text(encoding="utf-8"))
+
+
 class SolverTests(unittest.TestCase):
     def normalized(self, state=None):
         return solver._normalize_state(state or base_state())
@@ -719,6 +728,306 @@ class SolverTests(unittest.TestCase):
         self.assertEqual(report["preference_summary"]["score_tiers"]["favorite"], ["A"])
         self.assertTrue(report["draw_decision"]["should_draw"])
 
+    def test_score_derived_top_target_combines_equal_highest_scores(self):
+        raw = base_state()
+        raw["preferences"] = {
+            "strategy": "只冲最爱",
+            "scores": {"A": 10, "B": 10, "C": 0},
+            "tie_tolerance_pp": 0,
+        }
+        state = self.normalized(raw)
+        concentrated = {
+            "p_like_any": 0.4,
+            "p_favorite_any": 0.4,
+            "p_dislike_any": 0.0,
+            "liked_probabilities": {"A": 0.4, "B": 0.0},
+            "favorite_probabilities": {"A": 0.4, "B": 0.0},
+            "disliked_probabilities": {},
+            "p_hard_avoid": 0.0,
+            "hard_avoid_probabilities": {},
+            "expected_score": 4.0,
+            "liked_weighted_score": 0.8,
+            "disliked_weighted_loss": 0.0,
+            "resale_ev": None,
+        }
+        combined = copy.deepcopy(concentrated)
+        combined.update(
+            {
+                "p_like_any": 0.6,
+                "p_favorite_any": 0.6,
+                "liked_probabilities": {"A": 0.3, "B": 0.3},
+                "favorite_probabilities": {"A": 0.3, "B": 0.3},
+                "expected_score": 6.0,
+                "liked_weighted_score": 0.9,
+            }
+        )
+
+        self.assertLess(
+            solver.compare_metrics(combined, concentrated, state),
+            0,
+        )
+        self.assertEqual(
+            solver._primary_tool_metric(combined, state),
+            (0.6, "p_favorite_any"),
+        )
+
+        raw["preferences"]["liked"] = ["A", "B"]
+        explicit_state = self.normalized(raw)
+        self.assertLess(
+            solver.compare_metrics(concentrated, combined, explicit_state),
+            0,
+        )
+        with self.assertRaisesRegex(
+            solver.StateError,
+            "requires score-derived liked designs",
+        ):
+            solver.build_preference_calibration_report(explicit_state)
+
+    def test_preference_calibration_builds_real_tradeoff_choices(self):
+        raw = score_calibration_fixture()
+        state = self.normalized(raw)
+        original_stop_rules = copy.deepcopy(state["preferences"]["stop_rules"])
+
+        report = solver.build_preference_calibration_report(state)
+        solver.validate_preference_calibration_report(report)
+
+        self.assertEqual(report["status"], "needs_confirmation")
+        self.assertEqual(report["primary_metric"]["metric"], "p_favorite_any_pp")
+        self.assertEqual(report["score_coverage"]["scored_design_count"], 5)
+        self.assertEqual(
+            report["score_tiers"]["hard_avoid"],
+            ["E"],
+        )
+        self.assertEqual(
+            [(choice["choice"], choice["box_id"]) for choice in report["choices"]],
+            [("1", "4"), ("2", "5"), ("3", "3")],
+        )
+        self.assertEqual(
+            report["choices"][0]["suggested_stop_rules"],
+            {
+                "min_favorite_any_pp": 29.0,
+                "max_dislike_any_pp": 42.0,
+                "max_hard_avoid_pp": 42.0,
+            },
+        )
+        self.assertFalse(report["stop_rules_mutated"])
+        self.assertTrue(report["confirmation_required"])
+        self.assertNotIn("draw_decision", report)
+        self.assertNotIn("next_tool_plan", report)
+        self.assertEqual(state["preferences"]["stop_rules"], original_stop_rules)
+
+    def test_preference_calibration_preserves_existing_quality_rules(self):
+        raw = score_calibration_fixture()
+        raw["preferences"]["stop_rules"].update(
+            {
+                "min_favorite_any_pp": 18,
+                "max_dislike_any_pp": 25,
+                "max_hard_avoid_pp": 8,
+            }
+        )
+        state = self.normalized(raw)
+        existing = copy.deepcopy(state["preferences"]["stop_rules"])
+
+        report = solver.build_preference_calibration_report(state)
+
+        self.assertEqual(report["existing_stop_rules"], existing)
+        self.assertEqual(state["preferences"]["stop_rules"], existing)
+        self.assertTrue(report["confirmation_required"])
+
+    def test_preference_calibration_supports_score_based_strategies(self):
+        cases = {
+            "稳妥避雷": "p_dislike_any_pp",
+            "整体最满意": "expected_score",
+            "随便中个喜欢": "p_like_any_pp",
+            "只冲最爱": "p_favorite_any_pp",
+            "守住底线": "expected_score",
+            "保值优先": "resale_ev",
+        }
+        for strategy, primary_metric in cases.items():
+            with self.subTest(strategy=strategy):
+                raw = base_state()
+                raw["preferences"] = {
+                    "strategy": strategy,
+                    "scores": {"A": 10, "B": 0, "C": -10},
+                    "stop_rules": {"max_draws": 2},
+                }
+                if strategy == "守住底线":
+                    raw["preferences"]["hard_avoid_max_pp"] = 100
+                if strategy == "保值优先":
+                    raw["market_values"] = {"A": 100, "B": 60, "C": 30}
+                report = solver.build_preference_calibration_report(
+                    self.normalized(raw)
+                )
+                self.assertEqual(
+                    report["primary_metric"]["metric"],
+                    primary_metric,
+                )
+                solver.validate_preference_calibration_report(report)
+
+    def test_resale_calibration_adds_market_and_personal_boundaries(self):
+        raw = score_calibration_fixture()
+        raw["preferences"]["strategy"] = "保值优先"
+        raw["market_values"] = {
+            "A": 120,
+            "B": 90,
+            "C": 60,
+            "D": 45,
+            "E": 25,
+        }
+        report = solver.build_preference_calibration_report(
+            self.normalized(raw)
+        )
+
+        self.assertEqual(report["primary_metric"]["metric"], "resale_ev")
+        self.assertTrue(report["market_value_coverage"]["complete"])
+        self.assertEqual(report["market_value_coverage"]["currency"], "CNY")
+        self.assertIn("resale_ev", report["attainable_ranges"])
+        self.assertTrue(report["choices"])
+        for choice in report["choices"]:
+            self.assertIn("resale_ev", choice["actual"])
+            self.assertIn("min_resale_ev", choice["suggested_stop_rules"])
+            self.assertIn(
+                "min_expected_score",
+                choice["suggested_stop_rules"],
+            )
+        solver.validate_preference_calibration_report(report)
+
+        markdown = solver.render_preference_calibration_markdown(report)
+        self.assertIn("预期二手价值", markdown)
+        self.assertIn("方案1", markdown)
+        self.assertIn("¥", markdown)
+        self.assertNotIn("回复 A/B/C", markdown)
+
+    def test_resale_calibration_requires_complete_market_values(self):
+        raw = base_state()
+        raw["preferences"] = {
+            "strategy": "保值优先",
+            "scores": {"A": 10, "B": 0, "C": -10},
+        }
+        raw["market_values"] = {"A": 100, "B": 60}
+
+        with self.assertRaisesRegex(
+            solver.StateError,
+            "requires current market_values for every design",
+        ):
+            self.normalized(raw)
+
+    def test_resale_calibration_zero_values_create_no_pseudo_threshold(self):
+        raw = base_state()
+        raw["preferences"] = {
+            "strategy": "保值优先",
+            "scores": {"A": 10, "B": 0, "C": -10},
+        }
+        raw["market_values"] = {"A": 0, "B": 0, "C": 0}
+
+        report = solver.build_preference_calibration_report(
+            self.normalized(raw)
+        )
+
+        self.assertEqual(report["status"], "target_unreachable")
+        self.assertEqual(report["choices"], [])
+        solver.validate_preference_calibration_report(report)
+
+    def test_preference_calibration_requires_complete_confirmed_scores(self):
+        raw = base_state()
+        raw["preferences"] = {
+            "strategy": "只冲最爱",
+            "scores": {"A": 10, "C": -10},
+        }
+        state = self.normalized(raw)
+        with self.assertRaisesRegex(
+            solver.StateError,
+            "requires every design to have a score",
+        ):
+            solver.build_preference_calibration_report(state)
+
+        raw["preferences"]["score_default"] = 0
+        state = self.normalized(raw)
+        with self.assertRaisesRegex(
+            solver.StateError,
+            "score_default_confirmed=true",
+        ):
+            solver.build_preference_calibration_report(state)
+
+        raw["preferences"]["score_default_confirmed"] = True
+        report = solver.build_preference_calibration_report(
+            self.normalized(raw)
+        )
+        self.assertTrue(report["score_coverage"]["score_default_used"])
+        self.assertTrue(report["score_coverage"]["score_default_confirmed"])
+
+    def test_preference_calibration_reports_unreachable_favorite(self):
+        raw = {
+            "series": "unreachable-favorite",
+            "model": {
+                "type": "unique_regular",
+                "designs": ["A", "B", "C"],
+            },
+            "boxes": [
+                {"id": "1", "excluded": ["A"], "status": "available"},
+                {"id": "2", "excluded": ["A"], "status": "available"},
+                {"id": "3", "excluded": [], "status": "sold_unknown"},
+            ],
+            "preferences": {
+                "strategy": "只冲最爱",
+                "scores": {"A": 10, "B": 0, "C": -10},
+                "stop_rules": {"max_draws": 2},
+            },
+            "tools": {},
+        }
+        report = solver.build_preference_calibration_report(
+            self.normalized(raw)
+        )
+
+        self.assertEqual(report["status"], "target_unreachable")
+        self.assertEqual(
+            report["attainable_ranges"]["p_favorite_any_pp"]["max"],
+            0.0,
+        )
+        self.assertEqual(report["choices"], [])
+        solver.validate_preference_calibration_report(report)
+
+    def test_preference_calibration_markdown_stops_before_a_draw_advice(self):
+        exit_code, output, error = self.cli_output(
+            score_calibration_fixture(),
+            "--calibrate-preferences",
+            "--format",
+            "markdown",
+        )
+
+        self.assertEqual(exit_code, 0, error)
+        self.assertIn("｜偏好校准", output)
+        self.assertIn("## 自动分档", output)
+        self.assertIn("## 当前端可达区间", output)
+        self.assertIn("卡片在边界确认后另行规划", output)
+        self.assertIn("回复 方案1/方案2/方案3 即确认", output)
+        self.assertIn("未推荐抽盒，也未改写停止线", output)
+        self.assertNotIn("建议抽 ", output)
+        self.assertNotIn("## 全款概率矩阵", output)
+
+    def test_preference_calibration_validation_rejects_advice_or_drift(self):
+        report = solver.build_preference_calibration_report(
+            self.normalized(score_calibration_fixture())
+        )
+        mutations = []
+
+        leaked_advice = copy.deepcopy(report)
+        leaked_advice["draw_decision"] = {"should_draw": True}
+        mutations.append(("formal recommendation leaked", leaked_advice))
+
+        mutated_rules = copy.deepcopy(report)
+        mutated_rules["stop_rules_mutated"] = True
+        mutations.append(("stop rules were mutated", mutated_rules))
+
+        drifted_actual = copy.deepcopy(report)
+        drifted_actual["choices"][0]["actual"]["p_favorite_any_pp"] += 1
+        mutations.append(("candidate actual metrics", drifted_actual))
+
+        for expected, malformed in mutations:
+            with self.subTest(expected=expected):
+                with self.assertRaisesRegex(solver.StateError, expected):
+                    solver.validate_preference_calibration_report(malformed)
+
     def test_guardrail_prefers_best_score_within_hard_limit(self):
         raw = base_state()
         raw["preferences"] = {
@@ -776,6 +1085,27 @@ class SolverTests(unittest.TestCase):
         report = solver.build_report(self.normalized(raw))
         self.assertFalse(report["draw_decision"]["should_draw"])
         self.assertIn("达到最多 1 盒", report["draw_decision"]["reasons"][0])
+
+    def test_resale_stop_rule_fails_closed_and_reports_cny(self):
+        raw = base_state()
+        raw["preferences"] = {
+            "strategy": "保值优先",
+            "scores": {"A": 10, "B": 0, "C": -10},
+            "stop_rules": {"min_resale_ev": 90},
+        }
+        raw["market_values"] = {"A": 100, "B": 60, "C": 30}
+        raw["tools"] = {}
+
+        exit_code, output, error = self.cli_output(
+            raw,
+            "--format",
+            "markdown",
+        )
+
+        self.assertEqual(exit_code, 0, error)
+        self.assertIn("建议停止", output)
+        self.assertIn("预期二手价值", output)
+        self.assertIn("≥ ¥90.00", output)
 
     def test_tray_screening_marks_a_directly_qualified_tray_ready(self):
         raw = base_state()
@@ -1971,7 +2301,15 @@ class SolverTests(unittest.TestCase):
         )
 
         self.assertEqual(exit_code, 0, error)
-        for label in solver.REPORT_RULE_LABELS.values():
+        for label in (
+            "喜欢款至少",
+            "最爱款至少",
+            "不喜欢款不超过",
+            "硬雷不超过",
+            "期望评分至少",
+            "最多抽盒数",
+            "策略硬雷上限",
+        ):
             self.assertIn(f"| {label} |", output)
 
     def test_markdown_session_report_enforces_the_global_draw_cap(self):

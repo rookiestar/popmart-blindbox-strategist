@@ -1,0 +1,37 @@
+{
+  "series": "合成评分校准系列",
+  "meta": {
+    "provenance": "synthetic",
+    "notes": ["为评分校准回归测试构造，不对应真实用户或抽盒记录。"]
+  },
+  "model": {
+    "type": "unique_regular",
+    "designs": ["A", "B", "C", "D", "E"],
+    "hint_labels": ["A", "B", "C", "D", "E"]
+  },
+  "boxes": [
+    {"id": "1", "excluded": [], "status": "available", "tool_used": false},
+    {"id": "2", "excluded": [], "status": "available", "tool_used": false},
+    {"id": "3", "excluded": ["D"], "status": "available", "tool_used": false},
+    {"id": "4", "excluded": ["C", "D"], "status": "available", "tool_used": false},
+    {"id": "5", "excluded": ["C", "E"], "status": "available", "tool_used": false}
+  ],
+  "preferences": {
+    "strategy": "只冲最爱",
+    "scores": {
+      "A": 10,
+      "B": 7,
+      "C": 0,
+      "D": -6,
+      "E": -10
+    },
+    "stop_rules": {
+      "max_draws": 2
+    },
+    "tie_tolerance_pp": 0.5
+  },
+  "tools": {
+    "hint_cards": 2,
+    "display_cards": 0
+  }
+}

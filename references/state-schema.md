@@ -280,8 +280,8 @@ input and strategy selection.
 | `守住底线` | `guardrail` | `scores`, `hard_avoid_max_pp`; `hard_avoid` may derive from scores |
 | `整体最满意` | `balanced` | `scores` |
 | `随便中个喜欢` | `target_only` | `liked` or scores that derive it |
-| `只冲最爱` | `top_target_first` | Ordered `liked` or scores that derive it |
-| `保值优先` | `resale_ev` | `market_values` |
+| `只冲最爱` | `top_target_first` | Ordered `liked`, or complete scores with at least one `+10` for calibration |
+| `保值优先` | `resale_ev` | Complete current `market_values`; complete `scores` for calibration |
 
 Prefer `strategy` in new state files. `objective_mode` remains supported for
 backward compatibility. The solver rejects conflicting values.
@@ -291,6 +291,9 @@ backward compatibility. The solver rejects conflicting values.
 - `scores`: satisfaction score from `-10` through `+10` by design.
 - `score_default`: score assigned to every unlisted design once at least one
   explicit score exists.
+- `score_default_confirmed`: set to `true` only after the user explicitly
+  confirms that every unlisted design shares `score_default`. Required by
+  `--calibrate-preferences` when the default actually fills designs.
 - `hard_avoid`: designs treated as hard failures.
 - `hard_avoid_max_pp`: maximum combined hard-avoid probability for
   `守住底线`, in percentage points.
@@ -314,14 +317,62 @@ When the corresponding field is absent, scores derive:
 - `hard_avoid` from the `hard_avoid` tier.
 
 An explicitly supplied field, including an empty array, overrides only its
-corresponding derivation. `score_default` participates after it fills unlisted
-designs. The normalized solver output exposes all seven groups in
+corresponding derivation for backward compatibility. `score_default`
+participates after it fills unlisted designs. New score-first sessions should
+prefer complete `scores`; never set a default merely because the user omitted
+items. The normalized solver output exposes all seven groups in
 `preference_summary.score_tiers` and records explicit versus score-derived
 sources.
 
 `scores` and `hard_avoid` solve different problems: scores rank trade-offs;
 the hard limit blocks compensation beyond the user's stated boundary. A hard
 score does not create a probability limit; `hard_avoid_max_pp` remains explicit.
+
+For score-derived `只冲最爱`, equal highest-score designs are one target group:
+all `+10` designs are maximized by combined probability. Supplying `liked`
+explicitly preserves its ordered, one-design-at-a-time legacy meaning and is
+therefore rejected by the score-first calibration entry point.
+
+### Preference calibration
+
+Before asking the user to invent probability thresholds, run the active tray
+with complete scores:
+
+```bash
+python3 scripts/blindbox_solver.py <state.json> \
+  --calibrate-preferences --format markdown
+```
+
+The calibration output contains:
+
+- score coverage and all seven derived tiers;
+- current-tray attainable ranges for favorite, liked, disliked, hard-avoid,
+  and expected score;
+- every drawable box's metrics and the non-dominated frontier;
+- up to three candidate boundary bundles anchored to actual boxes;
+- `stop_rules_mutated: false` and `confirmation_required: true`.
+
+All guided A–E goals use this score-first gate. `保值优先` additionally
+requires finite, non-negative, same-basis CNY `market_values` for every regular
+design. Its report adds attainable expected resale value and proposes
+`min_resale_ev` together with personal-score and risk boundaries.
+
+These are direct drawable-box metrics before new tool outcomes. Tool planning
+runs only after the user confirms boundaries; a random card branch does not
+define the user's risk preference.
+
+Candidate probability lines are rounded outward to whole percentage points so
+their reference box still passes. They are proposals, not score-derived facts.
+Expected scores round down to one decimal and expected resale values down to
+whole CNY for the same reason. Do not copy a bundle into `stop_rules` until the
+user selects scheme 1/2/3 or edits its numbers. A selected bundle applies to
+the current series session;
+recalibrate after a series change or material score change.
+
+Calibration requires every design to be scored. A partial score map fails
+closed. `score_default` may fill the rest only with
+`score_default_confirmed: true`. Existing explicit stop rules remain valid and
+are shown without being overwritten.
 
 ### Stopping conditions
 
@@ -333,6 +384,8 @@ score does not create a probability limit; `hard_avoid_max_pp` remains explicit.
 - `max_dislike_any_pp`: stop if its any-disliked probability is higher.
 - `max_hard_avoid_pp`: stop if its hard-avoid probability is higher.
 - `min_expected_score`: stop if its expected score is lower.
+- `min_resale_ev`: stop if its probability-weighted expected resale value is
+  lower; requires complete `market_values`.
 - `max_draws`: stop once this many boxes are already opened.
 
 Every configured condition must pass. Re-evaluate after every clue, display,
@@ -408,7 +461,7 @@ does not change the probability model or create preference defaults.
 | Field | Meaning |
 |---|---|
 | `mode` | `guided` when the assistant is collecting a decision brief step by step. |
-| `phase` | Next incomplete phase: `parse`, `clarify`, `goal`, `preferences`, `commitment`, `tools`, `risk`, `contract`, or `ready`. |
+| `phase` | Next incomplete phase: `parse`, `clarify`, `goal`, `preferences`, `commitment`, `tools`, `calibration`, `contract`, or `ready`. Legacy `risk` means the same pending calibration step. |
 | `settled` | Semantic facts already answered or reliably read from the screenshot. |
 | `pending_question` | The one current question in normal mode; `null` when none. |
 | `defaults_applied` | Suggested defaults the user explicitly accepted. Keep unconfirmed suggestions out of calculation fields. |

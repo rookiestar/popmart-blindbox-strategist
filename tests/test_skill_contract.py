@@ -125,8 +125,9 @@ class SkillContractTests(unittest.TestCase):
 
         self.assertIn("七档默认规则", strategies)
         self.assertIn("显式空数组也覆盖自动推导", strategies)
-        self.assertIn("硬雷上限：15%", strategies)
-        self.assertIn("其余 0", strategies)
+        self.assertIn("其余款 0", strategies)
+        self.assertIn("score_default_confirmed", strategies)
+        self.assertIn("--calibrate-preferences", strategies)
         self.assertIn("min_favorite_any_pp", strategies)
         self.assertIn("所有 `+10` 最爱款的合计概率", strategies)
 
@@ -241,11 +242,11 @@ class SkillContractTests(unittest.TestCase):
             "截图解析",
             "阻塞信息澄清",
             "目标",
-            "目标所需偏好",
+            "逐款评分",
             "必须抽 / 可换端或停止",
             "卡片与预算",
-            "预计算",
-            "上下文风险边界",
+            "当前端校准",
+            "边界确认",
             "决策合同",
             "精确计算",
             "新线索后全局重算",
@@ -254,11 +255,45 @@ class SkillContractTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         self.assertIn("约 3 分钟", guided)
         self.assertIn("一次收集最少必要信息", guided)
-        self.assertIn("不得静默设置硬雷概率上限", guided)
-        self.assertIn("先预计算", guided)
+        self.assertIn("不得套用固定 `15%`", guided)
+        self.assertIn("--calibrate-preferences", guided)
         self.assertIn("明确确认", guided)
         self.assertIn("保值优先", guided)
         self.assertIn("用户主动询问市场", guided)
+
+    def test_score_first_calibration_is_a_confirmation_gate(self):
+        skill = (ROOT / "SKILL.md").read_text()
+        strategies = (
+            ROOT / "references" / "preference-strategies.md"
+        ).read_text()
+        schema = (ROOT / "references" / "state-schema.md").read_text()
+        probability = (
+            ROOT / "references" / "probability-model.md"
+        ).read_text()
+        output = (ROOT / "references" / "output-templates.md").read_text()
+        evals = (ROOT / "references" / "review-and-evals.md").read_text()
+        template = json.loads(
+            (ROOT / "assets" / "session-state-template.json").read_text()
+        )
+
+        for document in (skill, strategies, schema, probability, output):
+            self.assertIn("--calibrate-preferences", document)
+        for document in (skill, strategies, schema, output):
+            self.assertIn("score_default_confirmed", document)
+        self.assertIn("stop_rules_mutated: false", schema)
+        self.assertIn("confirmation_required: true", schema)
+        self.assertIn("scheme 1/2/3", output)
+        self.assertIn("保值优先", strategies)
+        self.assertIn("min_resale_ev", schema)
+        self.assertIn("min_resale_ev", probability)
+        self.assertIn("Numbered calibration schemes", evals)
+        self.assertIn("not a draw recommendation", skill)
+        self.assertIn("current series session", schema)
+        self.assertIn("E23 — Score-first preference calibration", evals)
+        self.assertNotIn("liked", template["preferences"])
+        self.assertNotIn("disliked", template["preferences"])
+        self.assertNotIn("hard_avoid", template["preferences"])
+        self.assertNotIn("score_default", template["preferences"])
 
     def test_guidance_state_and_response_contract_are_documented(self):
         schema = (ROOT / "references" / "state-schema.md").read_text()

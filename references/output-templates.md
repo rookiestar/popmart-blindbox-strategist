@@ -192,8 +192,8 @@ together. Remove every item already known.
 
 ## J. Guided intake — decision contract
 
-Use after preliminary calculation and any contextual risk question, before the
-final exact recommendation:
+Use after the score-first calibration choice, before the final exact
+recommendation:
 
 ```markdown
 ## 请确认本轮决策
@@ -204,6 +204,7 @@ final exact recommendation:
 - 偏好：最爱……；喜欢……；中性但失望……；轻雷……；硬雷……
 - 行动边界：必须抽 / 可换端 / 可停止；最多……盒
 - 道具与预算：提示卡……；显示卡……；额外付费……
+- 校准选择：方案1/2/3；参考盒……
 - 风险与停止线：……
 - 采用的建议默认值：无 / ……
 
@@ -215,3 +216,39 @@ Never insert an unconfirmed hard-risk cap. In guided mode, do not present the
 final box recommendation until this contract is explicitly confirmed. After
 confirmation, set `meta.guidance.confirmed` to `true`, run the current global
 state, and use template B or G.
+
+## K. Score-first preference calibration
+
+Use after complete per-design scores, action boundaries, and current card
+counts are known, but before quality probability lines are confirmed:
+
+```bash
+python3 scripts/blindbox_solver.py <state.json> \
+  --calibrate-preferences --format markdown
+```
+
+Return stdout unchanged. This report is intentionally not template B: it
+contains no draw/card recommendation and does not mutate `stop_rules`. It must
+show:
+
+- all seven score-derived tiers and complete score coverage;
+- current-tray attainable ranges;
+- every drawable box's favorite, liked, disliked, hard-avoid, and expected
+  score metrics;
+- for `保值优先`, complete market-value coverage and expected resale value;
+- the non-dominated frontier;
+- up to three concrete numbered boundary bundles.
+
+State that these are direct-box metrics before new tool outcomes. Plan cards
+only after the boundary bundle is confirmed.
+
+Tell the user that replying with scheme 1/2/3 confirms that bundle for the
+current series session; edited numbers are also valid. Only after that reply may the
+assistant write the selected quality lines into `stop_rules`. In a multi-tray
+session, append matching `stop_rule_override` events with old/new values and
+the confirmed choice as reason. Then present template J for confirmation and
+run template B or G.
+
+If the report says `target_unreachable`, do not create a 0% target threshold.
+Switch trays or stop. If `score_default` filled any design, calibration is
+valid only when `score_default_confirmed: true`.

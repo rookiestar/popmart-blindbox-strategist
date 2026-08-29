@@ -15,9 +15,8 @@
     {"id": "3", "excluded": [], "status": "sold_unknown", "tool_used": false}
   ],
   "preferences": {
-    "liked": ["A"],
-    "disliked": ["C"],
     "strategy": "稳妥避雷",
+    "scores": {"A": 10, "B": 0, "C": -10},
     "tie_tolerance_pp": 0.1
   },
   "tools": {"hint_cards": 1, "display_cards": 1},
