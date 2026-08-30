@@ -169,13 +169,18 @@
       },
       {
         "seq": 2,
+        "type": "tray_committed",
+        "tray_id": "tray-a"
+      },
+      {
+        "seq": 3,
         "type": "opened_result",
         "tray_id": "tray-a",
         "box_id": "3",
         "design": "C"
       },
       {
-        "seq": 3,
+        "seq": 4,
         "type": "stop_rule_override",
         "tray_id": "tray-a",
         "rule": "max_draws",
@@ -184,7 +189,13 @@
         "reason": "首抽未命中，用户确认再抽一盒"
       },
       {
-        "seq": 4,
+        "seq": 5,
+        "type": "tray_released",
+        "tray_id": "tray-a",
+        "reason": "首抽未命中，释放该端换端再抽"
+      },
+      {
+        "seq": 6,
         "type": "tray_switch",
         "tray_id": "tray-b"
       }

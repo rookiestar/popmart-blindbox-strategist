@@ -18,8 +18,8 @@ Read only what the current stage needs:
 - `references/preference-strategies.md` when capturing scores, choosing a strategy, or deciding whether to stop.
 - `references/tray-screening.md` when a timed tray must be kept or released.
 - `references/probability-model.md` before running or interpreting the solver.
-- `references/output-templates.md` for market, calibration, screening, intake,
-  review, and the standard-report handoff boundary.
+- `references/output-templates.md` for market, calibration, screening,
+  comparison, intake, review, and the standard-report handoff boundary.
 - `references/review-and-evals.md` after a real draw or when improving this skill.
 - Run `scripts/blindbox_solver.py` for deterministic tray-level calculations.
 - Run `scripts/qiandao_market_snapshot.py` for the mainland resale fast path.
@@ -45,9 +45,11 @@ Read only what the current stage needs:
 12. **Default to regular-only.** Do not research, price, model, or expand hidden designs. Write exactly once: `隐藏款：默认未计入`. Enter the hidden-design branch only when the user explicitly requests it.
 13. **Stay API-key-free.** Never require the user to configure a third-party search provider or API key. Use capabilities already available in the host, direct public fetches, or user-supplied links, HTML, and screenshots. Missing market tools must not block screenshot parsing or preference/probability analysis.
 14. **Guide before calculating.** A screenshot alone is enough to begin. Read visible facts first, ask only for subjective choices or unreadable blockers, and confirm a compact decision contract before the final calculation.
-15. **Honor an accepted tray.** Once a tray is accepted, keep it locked until
-    the user explicitly releases it with a reason. Record any stop-rule change
-    with its old value, new value, and confirmed reason.
+15. **Honor tray commitments.** The first real card or opening commits that
+    tray as a candidate; once every quality line passes it upgrades to
+    accepted. Keep either lock until the user explicitly releases it with a
+    reason. Record any stop-rule change with its old value, new value, and
+    confirmed reason.
 16. **Relay the validated report.** Every formal draw decision uses the
     solver's Markdown renderer as the sole user-facing decision body. Do not
     paraphrase, reorder, shorten, or rebuild its required sections.
@@ -116,6 +118,43 @@ python3 scripts/qiandao_market_snapshot.py "<exact Chinese series name>" \
    budget, risk limit, and stopping line in one batch.
 
 Follow `references/market-research.md` exactly.
+
+## Stage 1.5 — Zero-tray preference briefing
+
+Trigger: the user states preferences (or a full design table with scores)
+before any tray screenshot exists, and wants to know what their preferences
+are worth before entering a draw machine.
+
+1. Build a briefing state: `regular_count`, optionally the explicit `designs`
+   list, session-level `preferences`, `tools`, and `market_values`. No boxes,
+   no trays. Incomplete design or score coverage fails closed — never guess a
+   missing design or invent a default score.
+2. Run and relay stdout unchanged:
+
+```bash
+python3 scripts/blindbox_solver.py examples/synthetic-preference-briefing.json \
+  --brief-preferences --format markdown
+```
+
+3. The report shows the blind baseline under the complete no-duplicate
+   uniform prior and the `current_tray_not_observed` warning. It is a prior
+   baseline, never a current-tray calibration: do not describe any line as
+   attainable on a specific tray, and do not rank boxes.
+4. For `随便中个喜欢` only, the report offers a deterministic balanced scheme:
+   five-percentage-point steps that strictly improve the blind baseline, with
+   40% liked / 35% disliked / 20% hard-avoid anchors for weak baselines. These
+   are judgment suggestions: after the user confirms, write them into the
+   existing session-level `stop_rules` (no second entry-line set) and record
+   `stop_rule_override` events in a session envelope. Every other strategy
+   gets baselines only and is redirected to Stage 2.5 calibration once a real
+   tray is observed.
+5. Check the preference-consistency section before offering lines: explicit
+   `liked`/`disliked`/`hard_avoid` or `explicit_score_tiers` entries that
+   contradict score-derived tiers block reference lines. Resolve them with the
+   user instead of choosing a source silently.
+6. When the user later supplies a tray screenshot, move to Stage 2 with the
+   confirmed preferences carried over; the briefing itself is not a tray and
+   never becomes one.
 
 ## Stage 2 — Parse screenshot and establish state
 
@@ -203,9 +242,53 @@ python3 scripts/blindbox_solver.py <state.json> \
 
 原样转交 stdout 中的快报。
 Treat raw clue count as non-diagnostic. Run depth two and the complete TOP 3
-report only after the user keeps the tray. When the user accepts a qualifying
-tray, set `accepted_tray_id` and append `tray_accepted`. A later switch requires
-`tray_released` with a concise user-confirmed reason first.
+report only after the user keeps the tray. On a single-tray session, append an
+automatic `tray_committed` immediately before the first real card/open. In a
+multi-tray session, the selected tray must already have an explicit
+`tray_committed`; never infer selection from an action. When real clues pass
+every quality line, append `tray_accepted`, persist `accepted_tray_id`, and
+clear `candidate_tray_id`. A later switch requires `tray_released` with a
+concise user-confirmed reason first.
+
+## Stage 2.7 — Compare multiple trays
+
+Trigger: the session state already carries at least two observed trays AND the
+user explicitly asks which end to play. A single tray never enters this stage;
+it stays on Stage 2.6 or Stage 3. Adding a second tray mid-session must not
+reset preferences, quality lines, global card counts, draws used, or prior tray
+evidence.
+
+Run and relay stdout unchanged:
+
+```bash
+python3 scripts/blindbox_solver.py examples/synthetic-tray-comparison.json \
+  --compare-trays --format markdown
+```
+
+1. Compare only trays from the same declared series under the shared strategy
+   and quality lines. Every tray is solved independently: box numbers,
+   exclusions, sold-unknown boxes, and posteriors never cross trays.
+2. The comparison table lists, per tray: tray ID, direct best box, the three
+   quality metrics (liked / any disliked / hard avoid), direct status, first
+   tool action, and the qualifying-branch probability. That probability is the
+   branch chance of still drawing after a tool outcome with every quality line
+   met — never a win rate.
+3. Released, history-read-only (`participation: "history"`), and inoperable
+   trays drop out of the ranking and appear only in the review section.
+4. Ranking reuses the existing strategy metrics, stop lines, and fewer-cards
+   principle; it creates no new implicit strategy. Directly qualifying trays
+   order by strategy metrics; tool-dependent trays lead with the
+   qualifying-branch probability.
+5. The comparison defaults to one-step planning. Run `--compare-depth 2` only
+   when at least two cards remain, the user explicitly asks for lookahead, and
+   the timer allows it; it expands only the top-ranked head candidates and the
+   report states whether the first action changed versus one step.
+6. Before acting on a selected tool-dependent tray, append `tray_committed`
+   and set `candidate_tray_id`; this is never a direct acceptance. Once real
+   clues pass every quality line, append `tray_accepted`, set
+   `accepted_tray_id`, and clear the candidate.
+7. A committed or accepted tray is not bypassed: the report itself flags that
+   switching requires a recorded release with a reason first.
 
 ## Stage 3 — Compute current strategy
 
@@ -299,16 +382,20 @@ If the user asks whether more cards are “worth it”:
 When the user reports a hint or display result:
 
 1. Confirm whether it is actual or hypothetical from wording and context.
-2. Update only the active tray. For an actual hint, append the excluded design
+2. Update only the active tray. Before the first real action, ensure the
+   lifecycle event is present: auto-append `tray_committed` only for a
+   single-tray session; a multi-tray session requires the selected tray's
+   explicit commitment. For an actual hint, append the excluded design
    and set `tool_used: true`; for a display, set `known` and `tool_used: true`.
 3. Decrement the session-level remaining card count and append the matching
    actual event. For a switch, append `tray_switch` and update
    `active_tray_id`.
 4. For an opened purchase, set `status: opened`, retain the known design,
    increment session `draws_used`, and append `opened_result`.
-5. For an accepted tray, retain `accepted_tray_id`. Before switching away,
-   append `tray_released` with the confirmed reason and clear the lock. Record
-   a new lock with `tray_accepted`.
+5. For a committed tray that now passes every quality line, append
+   `tray_accepted`, move its ID from `candidate_tray_id` to
+   `accepted_tray_id`, and keep that lock. Before switching away, append
+   `tray_released` with the confirmed reason and clear the lock.
 6. For a confirmed stop-rule change, append `stop_rule_override` with the
    rule, old value, new value, event order, active tray, and concise reason.
 7. Recompute the active tray from session-wide tool and draw counters. Retain
@@ -337,9 +424,32 @@ When the user reports a hint or display result:
 ## Stage 6 — Final draw review
 
 When the user reports the purchased result and asks whether to continue, first
-apply Stage 5 and return the standard report for the next draw. Produce the
-review in `references/review-and-evals.md` when the user asks for a review or
-the session ends.
+apply Stage 5 and return the standard report for the next draw. When the user
+asks for a whole-session review or the session ends, the review is generated
+by replaying the append-only event ledger — never reconstructed by hand from
+memory. Run and relay stdout unchanged:
+
+```bash
+python3 scripts/blindbox_solver.py examples/synthetic-session-review.json \
+  --review-session --format markdown
+```
+
+`--review-session` cannot be combined with planning flags, `--screen-tray`,
+`--calibrate-preferences`, `--compare-trays`, or `--brief-preferences`. It
+rewinds the final state, replays every event in order, and reports, per
+opening: the actual design's ex-ante probability and rank, the ex-ante
+liked/disliked/neutral/hard-avoid class probabilities, the accepted failure
+probability under the declared objective, the quality lines as they stood
+(including pre-override values), and the comparison with the strongest
+alternative at decision time. Every hint/display card shows its real result,
+the ex-ante still-drawable branch probability, the best box and liked
+probability before/after, and whether it changed the decision. The report
+lists the full commitment/accept/release/switch lifecycle plus every
+stop-rule override with old value, new value, order, and reason; separates
+decision quality, outcome quality, and model quality; and flags sunk-cost and
+gambler-fallacy patterns using ex-ante information only. A legacy state
+without an event ledger marks openings, cards, per-draw quality lines, and
+overrides as 不可恢复 instead of fabricating numbers.
 
 At minimum include:
 
@@ -347,7 +457,7 @@ At minimum include:
 - whether the chosen box was optimal under the stated objective;
 - what the strongest alternative would have changed;
 - tool-by-tool information value and whether each changed the decision;
-- accepted-tray lifecycle and every stop-rule override;
+- committed/accepted/released tray lifecycle and every stop-rule override;
 - decision quality versus outcome quality;
 - preference-model update, especially when a supposedly neutral item feels disappointing;
 - assumption audit;
@@ -360,8 +470,8 @@ At minimum include:
 - The real state was not contaminated by a counterfactual branch.
 - Every clue, tool, and opening stayed in its stable tray; remaining tools and
   draws used came from the session envelope.
-- An accepted tray was not bypassed without a recorded release; stop-rule
-  changes retained old/new values and the confirmed reason.
+- A committed or accepted tray was not bypassed without a recorded release;
+  stop-rule changes retained old/new values and the confirmed reason.
 - No box received more than one user tool.
 - All probabilities came from the current global state.
 - A timed tray was screened by quality lines, not raw clue count; switching
@@ -375,5 +485,17 @@ At minimum include:
 - The model report labels probabilities as conditional and exposes
   `regular_only_scope` / `hint_mechanism_assumed` when applicable.
 - The response contains exactly one `隐藏款：默认未计入` note unless the user explicitly enabled hidden-design modeling.
+- A zero-tray briefing was relayed only as a blind baseline with
+  `current_tray_not_observed`; no line was described as attainable on a
+  specific tray, and unconfirmed briefing lines never entered `stop_rules`.
+- A multi-tray comparison ran only with at least two observed trays and an
+  explicit user request; it reset no preferences, quality lines, card counts,
+  draw counts, or tray history, kept released/history/inoperable trays out of
+  the action ranking, and labeled qualifying-branch probabilities as not a
+  win rate.
 - In guided mode, the decision contract was explicitly confirmed before the
   final exact recommendation.
+- A whole-session review came from `--review-session` replaying the event
+  ledger; its per-event numbers were ex-ante, its lifecycle and override list
+  matched the ledger, and legacy blind spots were marked 不可恢复 rather than
+  filled with current-state probabilities.

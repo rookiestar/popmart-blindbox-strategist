@@ -52,6 +52,10 @@ append a second recommendation. The renderer itself guarantees:
 - TOP 3 summary plus one design-by-box matrix covering every design;
 - distinct `已排除` and `0.00%（全局约束）` cells;
 - every configured stop line and its pass/fail state;
+- the tray lifecycle sentence (未承诺 / 候选承诺 / 已接受 — a tool-dependent
+  selection is never faked as directly qualified), including the auto-upgrade
+  note once real clues pass every quality line and the reasoned-release
+  requirement before any switch;
 - one executable next action: 直接抽 / 停止 / 使用提示卡 / 使用显示卡;
 - the `条件概率` scope and applicable `regular_only_scope` /
   `hint_mechanism_assumed` warnings.
@@ -64,8 +68,10 @@ correct the state and rerun; never fall back to a partial manual report.
 1. Decide whether the message is an actual event or a counterfactual.
 2. Apply the actual event only to the active tray; update the session-level
    tool and draw counters.
-3. Preserve the confirmed strategy, preference scores, stop lines, accepted
-   tray lock, and prior trays.
+3. Preserve the confirmed strategy, preference scores, stop lines, candidate
+   or accepted tray lock, and prior trays. A real card or opening on a new
+   tray records its candidate commitment automatically; reaching every
+   quality line upgrades it to accepted without touching earlier events.
 4. Run template B's command and return stdout unchanged.
 
 “重来，需求不变” and “换一端，需求不变” preserve the decision contract.
@@ -132,6 +138,7 @@ Return stdout unchanged. This is the only compact decision surface.
 ## 端筛选
 
 **结论：直接可做 / 依赖道具 / 建议换端 / 本轮停止 / 需先设入场线。**
+**已锁定结论：候选复盘（候选承诺，未达线）/ 接受复盘（已接受）。**
 
 - 当前最佳盒：X号
 - 喜欢合计：...%（门槛 ...%，差 ...pp）
@@ -139,6 +146,7 @@ Return stdout unchanged. This is the only compact decision surface.
 - 硬雷合计：...%（上限 ...%，差 ...pp）
 - 若依赖道具：用提示卡/显示卡于 X号；结果后仍可抽的概率 ...%
 - 下一端入场线：默认摇盒后，当前最佳盒需同时满足以上全部质量线
+- 若本端为候选承诺：已达线后自动升级为已接受；如要换端，先说明理由并记录释放
 - 若本端已接受：保持锁定；如要换端，先说明理由并记录释放
 - 下一端不保证更好；本结论未使用固定提示条数
 - 隐藏款：默认未计入
@@ -157,7 +165,7 @@ Use `references/review-and-evals.md`. The first paragraph must answer:
 
 Never use “手气差” as a substitute for the actual probability.
 
-The review must list the accepted/released tray lifecycle and every
+The review must list the committed/accepted/released tray lifecycle and every
 `stop_rule_override` with its old value, new value, and confirmed reason.
 
 ## I. Guided intake — single question
@@ -252,3 +260,122 @@ run template B or G.
 If the report says `target_unreachable`, do not create a 0% target threshold.
 Switch trays or stop. If `score_default` filled any design, calibration is
 valid only when `score_default_confirmed: true`.
+
+## L. Zero-tray preference briefing
+
+Use when the user supplies preferences before any tray is observed — no
+screenshot, no boxes, only `regular_count` plus preferences:
+
+```bash
+python3 scripts/blindbox_solver.py examples/synthetic-preference-briefing.json \
+  --brief-preferences --format markdown
+```
+
+Return stdout unchanged. This report is intentionally not template B or K: it
+contains no draw/card recommendation, no current-tray attainability claim, and
+no `stop_rules` mutation. It must show:
+
+- the blind baseline under the complete no-duplicate uniform prior: favorite,
+  liked, disliked, and hard-avoid probabilities plus expected score (and
+  expected resale value for `保值优先` with complete market values);
+- the `current_tray_not_observed` warning stating the numbers are prior
+  baselines, not any observed tray's real level;
+- for `随便中个喜欢` with a non-empty liked group: five-point reference lines
+  that strictly improve the baseline, using 40% / 35% / 20% balanced anchors
+  for weak baselines, labeled as judgment suggestions; every other strategy
+  gets baselines only and a redirect to
+  `--calibrate-preferences` after entering a real tray;
+- explicit `liked`/`disliked`/`hard_avoid` or `explicit_score_tiers` entries
+  contradicting score-derived tiers, each marked `confirmation_required`;
+  these block reference lines
+  until the input is reconciled;
+- the existing stop rules plus `stop_rules_mutated: false` and
+  `confirmation_required: true`.
+
+Tell the user that confirming a reference line writes it into the existing
+`stop_rules` (recording a `stop_rule_override` event in a session); there is no
+second entry-line set. When a real tray is later observed, keep the confirmed
+scores, lines, budgets, and history, then continue with template K or B.
+
+## M. Multi-tray comparison
+
+Use only when the session state already carries at least two observed trays
+from the same series and the user explicitly asks which end to play. A single tray stays on
+template G or B; adding a second tray mid-session must not reset preferences,
+quality lines, global card counts, draw counts, or prior tray evidence.
+
+```bash
+python3 scripts/blindbox_solver.py examples/synthetic-tray-comparison.json \
+  --compare-trays --format markdown
+```
+
+Return stdout unchanged. Do not hand-assemble, reorder, or extend the
+comparison table. The renderer itself guarantees, in fixed order:
+
+1. `## 结论` — the overall verdict: comparable tray count, recommended tray
+   with its status and first action, the planning horizon used, whether a
+   recorded release is required before switching away from a candidate or
+   accepted tray, and that a future tray is not guaranteed to be better;
+2. `## 逐端比较` — one row per operable tray with rank, tray ID, direct best
+   box, the three quality metrics (liked / any disliked / hard avoid), direct
+   status, first tool action, and the qualifying-branch probability, plus the
+   statement that this probability is not a win rate. Rows mark the accepted
+   and candidate trays. Released, history read-only, and inoperable trays
+   appear only in the review sub-table, in that precedence order;
+3. `## 下一步（推荐端与首步动作）` — exactly one executable first action on
+   the recommended tray, or an explicit stop-or-review verdict when the
+   leading tray has no executable action. When the recommended tray is
+   tool-dependent and not yet locked, the step directs recording a candidate
+   commitment (`tray_committed`) after selection — never a direct acceptance —
+   with the auto-upgrade and reasoned-release rules restated;
+4. `## 质量线` — the shared session strategy, quality lines, and draw budget,
+   with the note that the comparison mutated nothing;
+5. `## 模型口径` — the conditional-probability scope, applicable model
+   warnings, and the independent-trays statement.
+
+Two-step horizon: `--compare-depth 2` is opt-in only, requires at least two
+remaining cards, expands only the top-ranked head candidates, and must state
+per expanded tray whether the first action changed versus one step and the
+terminal gain versus the one-card horizon.
+
+## N. Whole-session automatic review
+
+Use when the user asks for a session review or the session ends. The report is
+generated by replaying the append-only event ledger; never reconstruct it by
+hand, and never fill a missing historical number with a current probability:
+
+```bash
+python3 scripts/blindbox_solver.py examples/synthetic-session-review.json \
+  --review-session --format markdown
+```
+
+Return stdout unchanged. `--review-session` cannot be combined with planning
+flags, `--screen-tray`, `--calibrate-preferences`, `--compare-trays`, or
+`--brief-preferences`. The renderer itself guarantees, in fixed order:
+
+1. `# 盲盒整轮自动复盘：<系列>` and `## 复盘结论` — the stop conclusion,
+   draws used versus the cap, remaining cards, decision quality (optimal
+   openings or the non-optimal event list), outcome tallies, ex-ante-only
+   sunk-cost / gambler-fallacy flags, and data recoverability;
+2. `## 开盒逐次复盘` — per opening: the actual design with its ex-ante
+   probability and rank among possible designs, the ex-ante liked / neutral /
+   disliked (hard-avoid) class probabilities, the accepted failure probability
+   under the declared objective, the quality lines as they stood at the
+   decision (pre-override thresholds included), and either decision-time
+   optimality or the strongest alternative box with its liked-probability
+   delta;
+3. `## 道具卡逐张复盘` — per card: the real result, the ex-ante
+   still-drawable branch probability, the best box and liked probability
+   before/after with the metric change, whether the decision changed, and the
+   remaining count of that card type;
+4. `## 承诺与止损线变更` — every switch, commitment (marked 自动 when derived
+   from the first card/opening), lossless 达线升级 acceptance, acceptance,
+   release, and stop-rule override with old value, new value, and reason;
+5. `## 预算与停止结论` — remaining cards, draws used, the final stop
+   conclusion, and the cross-check against the ledger;
+6. `## 决策、结果与模型质量` — decision quality judged only against the
+   decision-time alternative, outcome quality stated separately, and model
+   zero-probability contradictions;
+7. `## 模型口径` — the conditional-probability scope and model warnings;
+8. `## 不可恢复项` — only for legacy states without an event ledger: each
+   unrecoverable field with its reason and the no-fabrication statement.

@@ -89,6 +89,7 @@ model, boxes, clues, known results, and `tool_used` flags.
   "series": "合成系列",
   "active_tray_id": "tray-b",
   "accepted_tray_id": null,
+  "candidate_tray_id": null,
   "draws_used": 1,
   "preferences": {
     "liked": ["A"],
@@ -137,25 +138,35 @@ model, boxes, clues, known results, and `tool_used` flags.
 - `tools` is the single remaining inventory used by every tray report.
 - `events` is append-only and uses contiguous `seq` values from `1`.
 - Supported events are `tray_switch`, `hint_used`, `display_used`,
-  `opened_result`, `tray_accepted`, `tray_released`, and
+  `opened_result`, `tray_committed`, `tray_accepted`, `tray_released`, and
   `stop_rule_override`; result fields must match the retained state.
 - Tool and opening events must exactly cover the trays' `tool_used` and
   `opened` boxes; one box may have at most one tool event before opening.
 - `accepted_tray_id` is `null` or the currently locked tray. Its acceptance
   lifecycle must match `tray_accepted` / `tray_released`; switching to another
   tray while locked is invalid.
+- `candidate_tray_id` is `null` or the tray holding a candidate commitment.
+  A multi-tray session requires an explicit `tray_committed` before any real
+  action. Only a single-tray session may auto-insert that event immediately
+  before its first real card/open (`first_tool_or_open`). An explicit value
+  must match the ledger. The session can hold at most one lock, so
+  `candidate_tray_id` and `accepted_tray_id` are never both set.
 - `tray_released` requires a concise reason. `stop_rule_override` requires the
   rule, old value, new value, active tray, and a user-supplied or confirmed
   reason; the latest new value must match session preferences.
-- A tray may not repeat session-level `preferences`, `tools`, or
-  `market_values`.
+- Every tray must use the session's declared series. A matching tray-level
+  `series` is normalized to the shared value; a different series fails.
+  Trays may not repeat session-level `preferences`, `tools`, or `market_values`.
+- A tray accepts an optional `participation` field: `"active"` (default) or
+  `"history"`. History trays are kept read-only for review and never enter an
+  action ranking.
 
 The CLI returns `session_summary`, `tray_reports` keyed by stable tray ID, and
 `actual_events`. `session_recommendation` and each report's `tray_lock` prevent
-an accepted tray from being bypassed silently. `session_review` repeats only
-the acceptance lifecycle and stop-rule overrides needed for final review.
-Only the active tray receives a requested card plan or timed screening; every
-retained tray remains available for posterior review.
+a committed or accepted tray from being bypassed silently. `session_review`
+repeats the commitment and acceptance lifecycles plus the stop-rule overrides
+needed for final review. Only the active tray receives a requested card plan or
+timed screening; every retained tray remains available for posterior review.
 
 ```bash
 python3 scripts/blindbox_solver.py \
@@ -165,22 +176,75 @@ python3 scripts/blindbox_solver.py \
 Legacy single-tray JSON remains valid. It is normalized internally as one
 implicit `tray-1` session while preserving the legacy report shape.
 
-### Accepted-tray lifecycle
+### Multi-tray comparison
 
-Accept only after the configured quality lines pass:
+When the session carries at least two observed trays and the user explicitly
+asks which end to play, compare them without touching the single-tray paths:
 
-```json
-{"seq": 2, "type": "tray_accepted", "tray_id": "tray-a", "reason": "all_acceptance_rules_passed"}
+```bash
+python3 scripts/blindbox_solver.py examples/synthetic-tray-comparison.json \
+  --compare-trays --format markdown
 ```
 
-To compare another tray, release before the switch:
+- Comparison requires one non-empty shared series. Every operable tray is
+  solved independently: box numbers, exclusions,
+  sold-unknown boxes, and posteriors never cross trays.
+- Trays excluded by a zero drawable-box count (inoperable), a `tray_released`
+  event, or `participation: "history"` drop out of the ranking and appear only
+  in the review section, in that precedence order.
+- The report ranks by the existing strategy metrics and status order
+  (`ready` → `tool_dependent` → `switch` → `needs_acceptance_rules` →
+  `session_stop`); tool-dependent trays lead with the qualifying-branch
+  probability. It creates no new strategy.
+- A ranked tool-dependent tray that the user would select records a candidate
+  commitment (`tray_committed`), never a direct acceptance; rows mark the
+  accepted and candidate trays, and switching away from either requires a
+  reasoned `tray_released` event first.
+- The comparison defaults to one-step planning. `--compare-depth 2` requires
+  at least two remaining cards, expands only the top-ranked head candidates,
+  and reports whether the first action changed versus one step.
+- The comparison never mutates preferences, quality lines, tool inventory,
+  draw counts, or events; it is a read-only decision surface over the session.
+
+### Tray commitment lifecycle
+
+A session tray moves through three phases: open (未承诺) → candidate
+(候选承诺) → accepted (已接受). Each transition is represented by its own
+ordered ledger event; normalized legacy gaps are upgraded into that canonical
+event form.
+
+A multi-tray selection that still depends on a card records a candidate
+commitment instead of pretending it already qualifies:
 
 ```json
-{"seq": 3, "type": "tray_released", "tray_id": "tray-a", "reason": "用户确认继续比较其他端"}
-{"seq": 4, "type": "tray_switch", "tray_id": "tray-b"}
+{"seq": 2, "type": "tray_committed", "tray_id": "tray-a"}
 ```
 
-Set `accepted_tray_id` to `tray-a` while locked and to `null` after release.
+For a single-tray session only, the first real card/open auto-inserts
+`tray_committed` immediately before the action; its source is
+`first_tool_or_open`. Multi-tray actions require the explicit event above.
+When real clues push every configured quality line past its threshold, the
+ledger gains `tray_accepted`, `accepted_tray_id` is persisted, and
+`candidate_tray_id` is cleared. The source is `quality_lines_upgrade`; an
+explicit confirmation uses `explicit_event`:
+
+```json
+{"seq": 5, "type": "tray_accepted", "tray_id": "tray-a", "reason": "all_acceptance_rules_passed"}
+```
+
+To compare another tray from either lock, release first with a reason; a
+silent switch is rejected:
+
+```json
+{"seq": 6, "type": "tray_released", "tray_id": "tray-a", "reason": "用户确认继续比较其他端"}
+{"seq": 7, "type": "tray_switch", "tray_id": "tray-b"}
+```
+
+Set `candidate_tray_id` while a candidate commitment is held, `accepted_tray_id`
+while accepted, and both to `null` after release. Global prompt cards,
+display cards, draw counts, stopping rules, and event order stay unchanged
+across commitment, upgrade, release, and switching; counterfactual planning
+never touches the real commitment.
 
 ### Stop-rule override
 
@@ -198,6 +262,110 @@ Set `accepted_tray_id` to `tray-a` while locked and to `null` after release.
 
 Use `null` for an absent old or new value. Multiple changes to the same rule
 must form a contiguous old-to-new chain.
+
+### Whole-session review
+
+The final review is generated by replaying the append-only ledger, never by
+reconstructing history from the final state or memory:
+
+```bash
+python3 scripts/blindbox_solver.py examples/synthetic-session-review.json \
+  --review-session --format markdown
+```
+
+- The solver rewinds the final trays (un-opening boxes, un-using cards,
+  restoring pre-override stop rules), then replays every event in `seq` order,
+  snapshotting the ex-ante world before each card and opening.
+- Each opening reports the actual design's ex-ante probability and rank among
+  possible designs, the ex-ante liked / neutral / disliked (with hard-avoid)
+  class probabilities, the accepted failure probability under the declared
+  objective, the quality lines as they stood at that decision (including
+  pre-override thresholds), and the decision-time comparison with the strongest
+  alternative box. No post-opening information is used to judge the choice.
+- Each hint/display card reports its real result, the ex-ante probability that
+  the box stayed drawable after the card, the declared strategy's real primary
+  metric before/after, whether ranking changed, whether the card changed the
+  draw/stop action, and the remaining card count.
+- The lifecycle section lists every switch, commitment (explicit or single-tray
+  `first_tool_or_open`), persisted `quality_lines_upgrade` acceptance,
+  explicit acceptance, release, and stop-rule override with old value, new
+  value, contiguous order, and reason.
+- The report separates decision quality, outcome quality, and model quality,
+  and flags sunk-cost / gambler-fallacy patterns using ex-ante information
+  only. Global remaining cards, draws used, and the draw cap are cross-checked
+  against the ledger.
+- A legacy single-tray state without `events` produces a report whose
+  openings, cards, per-draw quality lines, and overrides are marked
+  不可恢复 (`legacy_state_without_event_ledger`); current-state probabilities
+  are never substituted for the missing history.
+- `--review-session` cannot be combined with planning flags, `--screen-tray`,
+  `--calibrate-preferences`, `--compare-trays`, or `--brief-preferences`.
+
+## Preference briefing (zero-tray)
+
+Before any tray is observed, collect series-level preferences as a briefing.
+It carries no `boxes` and no `trays`; `regular_count` (with an explicit
+`designs` list, or preferences that mention every regular design) drives a
+uniform blind-draw baseline under the complete no-duplicate assumption.
+
+```json
+{
+  "session_schema_version": 1,
+  "series": "合成系列·偏好简报",
+  "regular_count": 12,
+  "designs": ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"],
+  "preferences": {
+    "strategy": "随便中个喜欢",
+    "scores": {
+      "A": 10, "B": 8, "C": 7, "D": 6, "E": 5, "F": 1,
+      "G": 0, "H": 0, "I": -2, "J": -3, "K": -6, "L": -10
+    },
+    "stop_rules": {"max_draws": 2}
+  },
+  "tools": {"hint_cards": 2, "display_cards": 1},
+  "meta": {"provenance": "synthetic"}
+}
+```
+
+Run the briefing report with:
+
+```bash
+python3 scripts/blindbox_solver.py \
+  examples/synthetic-preference-briefing.json --brief-preferences --digits 10
+```
+
+or, for the reader-facing Markdown:
+
+```bash
+python3 scripts/blindbox_solver.py \
+  examples/synthetic-preference-briefing.json \
+  --brief-preferences --format markdown
+```
+
+Rules:
+
+- Coverage fails closed: the explicit design list must match `regular_count`,
+  and a derived design set (from scores, `liked`, `disliked`, `hard_avoid`,
+  or `market_values` keys) must cover exactly `regular_count` designs. The
+  solver never guesses missing designs; mixture models require a real tray.
+- A design cannot carry two different scores: conflicting `scores` and
+  `utility_scores` tables are rejected.
+- Explicit `liked`, `disliked`, or `hard_avoid` entries that contradict
+  score-derived tiers are listed in the report's `preference_conflicts` with
+  `confirmation_required`. Legacy normalization still records the current
+  explicit source, but reference lines remain blocked until the input is
+  reconciled.
+- The report is a prior baseline, never a current-tray calibration: it warns
+  `current_tray_not_observed`, ranks no boxes, and never claims a line is
+  attainable on a specific tray.
+- For `随便中个喜欢` only, reference lines use five-percentage-point steps and
+  strictly improve the blind baseline. Weak baselines use the public balanced
+  anchors: liked at least 40%, disliked at most 35%, hard avoid at most 20%.
+  They are judgment suggestions with `stop_rules_mutated: false`; after confirmation
+  they are written into the existing session-level `stop_rules` — never a
+  second entry-line set.
+- All other strategies receive baselines only and are redirected to
+  `--calibrate-preferences` once a real tray is observed.
 
 ## `model`
 
@@ -289,11 +457,15 @@ backward compatibility. The solver rejects conflicting values.
 ### Scores and hard limits
 
 - `scores`: satisfaction score from `-10` through `+10` by design.
-- `score_default`: score assigned to every unlisted design once at least one
-  explicit score exists.
+- `explicit_score_tiers`: optional seven-tier declarations keyed by the names
+  below. A design may appear once; disagreement with its numeric score is a
+  blocking `confirmation_required` conflict.
+- `score_default`: score assigned to unlisted designs only when
+  `score_default_confirmed` is `true`; with confirmation it may also describe
+  an all-design common score.
 - `score_default_confirmed`: set to `true` only after the user explicitly
-  confirms that every unlisted design shares `score_default`. Required by
-  `--calibrate-preferences` when the default actually fills designs.
+  confirms that every unlisted design shares `score_default`. Required before
+  the default fills any design in every mode.
 - `hard_avoid`: designs treated as hard failures.
 - `hard_avoid_max_pp`: maximum combined hard-avoid probability for
   `守住底线`, in percentage points.
@@ -317,8 +489,8 @@ When the corresponding field is absent, scores derive:
 - `hard_avoid` from the `hard_avoid` tier.
 
 An explicitly supplied field, including an empty array, overrides only its
-corresponding derivation for backward compatibility. `score_default`
-participates after it fills unlisted designs. New score-first sessions should
+corresponding derivation for backward compatibility. A confirmed
+`score_default` participates after it fills unlisted designs. New score-first sessions should
 prefer complete `scores`; never set a default merely because the user omitted
 items. The normalized solver output exposes all seven groups in
 `preference_summary.score_tiers` and records explicit versus score-derived
@@ -514,12 +686,15 @@ After the user buys box 11 and confirms A:
 
 The known item continues to constrain all remaining boxes.
 
-### Accept or release a tray
+### Commit, accept, or release a tray
 
-When every configured quality line passes and the user chooses to keep the
-tray, set `accepted_tray_id` and append `tray_accepted`. Before changing
-`active_tray_id` to another tray, append `tray_released` with the confirmed
-reason and clear `accepted_tray_id`.
+On a single-tray session, append an automatic `tray_committed` immediately
+before the first real card/open and set `candidate_tray_id`. In a multi-tray
+session, append the explicit commitment before acting. When every configured
+quality line passes, append `tray_accepted`, move the ID to
+`accepted_tray_id`, and clear `candidate_tray_id`. Before changing
+`active_tray_id`, append `tray_released` with the confirmed reason and clear
+the lock.
 
 ### Change a stopping condition
 

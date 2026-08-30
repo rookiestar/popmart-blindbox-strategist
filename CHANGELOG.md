@@ -2,6 +2,105 @@
 
 ## Unreleased
 
+- Added whole-session automatic review: `--review-session` deterministically
+  replays the append-only event ledger — rewinding the final trays (un-opening
+  boxes, un-using cards, restoring pre-override stop rules and the consumed
+  card inventory) and re-applying every event in order with an ex-ante
+  snapshot before each card and opening. The JSON report and reader-facing
+  Markdown are program-generated; nothing is reconstructed by hand.
+- Per opening, the review reports the actual design's ex-ante probability and
+  rank among possible designs, the ex-ante liked / neutral / disliked
+  (hard-avoid) class probabilities, the accepted failure probability under the
+  declared objective, the quality lines as they stood at the decision
+  (including pre-override thresholds), and the decision-time comparison with
+  the strongest alternative box — post-opening information never judges a
+  choice.
+- Per hint/display card, the review reports the real result, the ex-ante
+  still-drawable branch probability, the declared strategy's primary metric
+  before/after, ranking change, draw/stop decision change, and remaining count.
+- The lifecycle section lists every switch, commitment (explicit or
+  single-tray `first_tool_or_open`), persisted `quality_lines_upgrade`
+  acceptance, explicit acceptance, release, and stop-rule override with old
+  value, new value, contiguous order, and reason.
+- The report separates decision quality, outcome quality, and model quality,
+  flags sunk-cost and gambler-fallacy patterns using ex-ante information only,
+  cross-checks remaining cards, draws used, and the draw cap against the
+  ledger, and closes with the declared model scope and a final stop verdict
+  (budget exhausted / stopped below quality lines / still recommend drawing /
+  no drawable box remains).
+- Legacy states without an event ledger produce an honest review: openings,
+  cards, per-draw quality lines, and overrides are marked
+  `legacy_state_without_event_ledger` 不可恢复, and current-state probabilities
+  are never substituted for the missing history; the validator rejects any
+  fabricated legacy number.
+- `--review-session` is mutually exclusive with planning flags,
+  `--screen-tray`, `--calibrate-preferences`, `--compare-trays`, and
+  `--brief-preferences`, and refuses zero-tray briefings; existing single-tray
+  and multi-tray paths are untouched.
+- Added the candidate-tray commitment ladder: session trays move through
+  open (未承诺) → candidate (候选承诺) → accepted (已接受), surfaced in plain
+  language in standard reports, screening (`candidate_review` /
+  `accepted_review` plus `release_before_switch`), and the session review.
+- Added `tray_committed` and `candidate_tray_id`: selecting a tool-dependent
+  tray in a comparison records a candidate commitment instead of posing as
+  directly qualified. Multi-tray actions now require that explicit event;
+  only a single-tray session auto-inserts it before the first real card/open
+  (`first_tool_or_open`).
+- Added the quality-line upgrade: when real clues push every quality line past
+  its threshold, the ledger gains `tray_accepted`, `accepted_tray_id` is
+  persisted, and the candidate is cleared (`quality_lines_upgrade`). Later
+  recommendations stay locked; explicit acceptance remains `explicit_event`.
+- Hardened the release gate: switching away from a candidate or accepted tray
+  requires a reasoned `tray_released` event first; silent switches, releases
+  without a reason, re-committing the locked tray, and actions on other trays
+  while locked all fail closed. Global tools, draws, stop lines, and event
+  order stay identical across commitment, upgrade, release, and switching,
+  and counterfactual planning never mutates the real commitment.
+- Preserved lossless reads: legacy single-tray states with used tools or
+  opened boxes normalize straight to candidate commitments, and existing
+  `accepted_tray_id` sessions load unchanged; the validators reject tampered
+  lifecycle blocks, mismatched locks, and dropped comparison commitment steps.
+- Added optional multi-tray comparison: `--compare-trays` ranks every operable
+  tray in a same-series session envelope with at least two observed trays. Each tray is
+  solved independently, the shared strategy and quality lines are reused, and
+  released, history-read-only, and inoperable trays stay out of the action
+  ranking.
+- Added tray participation: trays accept `participation: "history"` to keep
+  them read-only for review; released trays are derived from `tray_released`
+  events and trays without drawable boxes are reported as inoperable.
+- Made the comparison report a validated decision surface: per-tray rows show
+  best box, liked / any-disliked / hard-avoid metrics, status, first tool
+  action, and the qualifying-branch probability explicitly labeled as not a
+  win rate; the recommendation names the top tray's first action or an
+  explicit stop-or-review verdict and never guarantees a better future tray.
+- Added opt-in two-step comparison: `--compare-depth 2` requires at least two
+  remaining cards, expands only the top-ranked head candidates, and reports
+  whether the first action changed versus the one-step horizon. The default
+  comparison stays one-step.
+- Kept every existing path unchanged: legacy single-tray JSON, `--screen-tray`,
+  formal reports, and calibration reject or ignore comparison mode, and the
+  comparison itself never mutates preferences, quality lines, tools, draws, or
+  events.
+- Added zero-tray preference briefings: `regular_count` plus preferences (and
+  optionally an explicit design table) normalize without any tray, and
+  `--brief-preferences` renders a validated blind-baseline report — favorite,
+  liked, disliked, and hard-avoid probabilities plus expected score under the
+  complete no-duplicate uniform prior — while warning
+  `current_tray_not_observed` and never claiming current-tray attainability.
+- Added stable no-tray reference lines for `随便中个喜欢`: five-point steps
+  strictly improve the blind baseline, with 40% liked / 35% disliked / 20%
+  hard-avoid anchors for weak baselines, labeled as judgment suggestions with
+  `stop_rules_mutated: false`; other strategies receive baselines only and are
+  redirected to `--calibrate-preferences` after entering a real tray.
+- Added preference-conflict gates: any duplicate JSON key now fails closed,
+  zero-tray score coverage must be complete, unconfirmed defaults do not fill
+  omitted designs, `explicit_score_tiers` represents all seven declared tiers,
+  and explicit `liked`/`disliked`/
+  `hard_avoid` entries that contradict score-derived tiers are listed in the
+  briefing with their override source instead of being silently resolved.
+- Split preference policy, lifecycle reduction, strategy-review metrics, and
+  CLI routing into focused modules; shared synthetic session builders remove
+  repeated fixtures.
 - Added score-first preference calibration: complete per-design scores now
   derive all seven tiers, while `--calibrate-preferences` reports current-tray
   attainable ranges, every box's metrics, and non-dominated numbered boundary

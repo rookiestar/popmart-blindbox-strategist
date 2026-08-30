@@ -1,0 +1,58 @@
+{
+  "session_schema_version": 1,
+  "series": "synthetic-session-review",
+  "active_tray_id": "t-b",
+  "draws_used": 2,
+  "preferences": {
+    "liked": ["A"],
+    "disliked": ["C"],
+    "hard_avoid": ["D"],
+    "objective_mode": "target_only",
+    "tie_tolerance_pp": 0.0,
+    "stop_rules": {"min_like_any_pp": 45, "max_draws": 3}
+  },
+  "tools": {"hint_cards": 1, "display_cards": 0},
+  "trays": [
+    {
+      "id": "t-a",
+      "model": {
+        "type": "unique_regular",
+        "designs": ["A", "B", "C", "D"],
+        "hint_labels": ["A", "B", "C", "D"]
+      },
+      "boxes": [
+        {"id": "1", "excluded": ["C", "D"], "status": "available", "tool_used": true, "known": "B"},
+        {"id": "2", "excluded": ["C", "D"], "status": "opened", "known": "A"},
+        {"id": "3", "excluded": ["B", "A"], "status": "available", "tool_used": true},
+        {"id": "4", "excluded": ["A", "B"], "status": "available"}
+      ]
+    },
+    {
+      "id": "t-b",
+      "model": {
+        "type": "unique_regular",
+        "designs": ["A", "B", "C", "D"],
+        "hint_labels": ["A", "B", "C", "D"]
+      },
+      "boxes": [
+        {"id": "1", "excluded": [], "status": "available"},
+        {"id": "2", "excluded": [], "status": "available"},
+        {"id": "3", "excluded": [], "status": "available"},
+        {"id": "4", "excluded": ["A"], "status": "opened", "known": "C"}
+      ]
+    }
+  ],
+  "events": [
+    {"seq": 1, "type": "tray_switch", "tray_id": "t-a"},
+    {"seq": 2, "type": "tray_committed", "tray_id": "t-a"},
+    {"seq": 3, "type": "hint_used", "tray_id": "t-a", "box_id": "3", "excluded": "A"},
+    {"seq": 4, "type": "display_used", "tray_id": "t-a", "box_id": "1", "design": "B"},
+    {"seq": 5, "type": "opened_result", "tray_id": "t-a", "box_id": "2", "design": "A"},
+    {"seq": 6, "type": "stop_rule_override", "tray_id": "t-a", "rule": "min_like_any_pp", "old_value": 55, "new_value": 45, "reason": "合成校准：边界下调"},
+    {"seq": 7, "type": "tray_released", "tray_id": "t-a", "reason": "合成原因：换端复盘"},
+    {"seq": 8, "type": "tray_switch", "tray_id": "t-b"},
+    {"seq": 9, "type": "tray_committed", "tray_id": "t-b"},
+    {"seq": 10, "type": "opened_result", "tray_id": "t-b", "box_id": "4", "design": "C"}
+  ],
+  "meta": {"provenance": "synthetic"}
+}

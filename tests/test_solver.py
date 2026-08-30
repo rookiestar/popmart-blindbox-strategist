@@ -139,8 +139,8 @@ class SolverTests(unittest.TestCase):
             {"hint_cards": 4, "display_cards": 1, "reveal_cards": 1},
         )
         self.assertEqual(report["session_summary"]["draws_used"], 1)
-        self.assertEqual(report["session_summary"]["event_count"], 5)
-        self.assertEqual(len(report["actual_events"]), 5)
+        self.assertEqual(report["session_summary"]["event_count"], 9)
+        self.assertEqual(len(report["actual_events"]), 9)
 
         tray_b = report["tray_reports"]["tray-b"]
         tray_c = report["tray_reports"]["tray-c"]
@@ -163,7 +163,7 @@ class SolverTests(unittest.TestCase):
         raw = multi_tray_session()
         raw["active_tray_id"] = "tray-a"
         raw["events"].append(
-            {"seq": 6, "type": "tray_switch", "tray_id": "tray-a"}
+            {"seq": 10, "type": "tray_switch", "tray_id": "tray-a"}
         )
 
         report = solver.build_session_report(
@@ -176,7 +176,7 @@ class SolverTests(unittest.TestCase):
             {"hint_cards": 4, "display_cards": 1, "reveal_cards": 1},
         )
         self.assertEqual(report["session_summary"]["active_tray_id"], "tray-a")
-        self.assertEqual(report["session_summary"]["event_count"], 6)
+        self.assertEqual(report["session_summary"]["event_count"], 10)
         tray_b_box_1 = next(
             row
             for row in report["tray_reports"]["tray-b"]["ranking"]
@@ -213,7 +213,7 @@ class SolverTests(unittest.TestCase):
         )
         self.assertEqual(session, before)
         self.assertEqual(report["actual_events"], before["events"])
-        self.assertEqual(report["session_summary"]["event_count"], 5)
+        self.assertEqual(report["session_summary"]["event_count"], 9)
 
     def test_accepted_tray_lock_reaches_the_complete_session_report(self):
         raw = session_lock_fixture()["accepted_session"]
@@ -356,7 +356,11 @@ class SolverTests(unittest.TestCase):
     def test_stop_rule_override_is_auditable_and_matches_final_state(self):
         raw = session_lock_fixture()["override_session"]
         report = solver.build_session_report(solver._normalize_session(raw))
-        ledger_event = report["actual_events"][2]
+        ledger_event = next(
+            event
+            for event in report["actual_events"]
+            if event["type"] == "stop_rule_override"
+        )
         review_event = report["session_review"]["stop_rule_overrides"][0]
 
         self.assertEqual(report["session_summary"]["max_draws"], 2)
@@ -379,7 +383,12 @@ class SolverTests(unittest.TestCase):
             solver._normalize_session(raw)
 
         raw = session_lock_fixture()["override_session"]
-        raw["events"][2]["tray_id"] = "tray-b"
+        override_event = next(
+            event
+            for event in raw["events"]
+            if event["type"] == "stop_rule_override"
+        )
+        override_event["tray_id"] = "tray-b"
         with self.assertRaisesRegex(
             solver.StateError, "must target the current event tray"
         ):
@@ -418,7 +427,7 @@ class SolverTests(unittest.TestCase):
 
     def test_session_event_ledger_must_match_real_tray_state(self):
         raw = multi_tray_session()
-        raw["events"][3]["excluded"] = "C"
+        raw["events"][6]["excluded"] = "C"
 
         with self.assertRaisesRegex(
             solver.StateError, "hint result must match"
@@ -426,7 +435,10 @@ class SolverTests(unittest.TestCase):
             solver._normalize_session(raw)
 
         raw = multi_tray_session()
-        raw["events"].pop(3)
+        # Drop the tray-b hint and its release so the tray holds a
+        # tool_used box with no matching ledger event and no lock.
+        for index in sorted((5, 6, 7), reverse=True):
+            raw["events"].pop(index)
         for seq, event in enumerate(raw["events"], start=1):
             event["seq"] = seq
         with self.assertRaisesRegex(
@@ -596,6 +608,7 @@ class SolverTests(unittest.TestCase):
             "strategy": "整体最满意",
             "scores": {"A": 10, "C": -10},
             "score_default": -2,
+            "score_default_confirmed": True,
         }
         state = self.normalized(raw)
         self.assertEqual(state["preferences"]["scores"]["B"], -2)
@@ -706,6 +719,7 @@ class SolverTests(unittest.TestCase):
         raw["preferences"] = {
             "scores": {"A": 10},
             "score_default": -6,
+            "score_default_confirmed": True,
         }
         preferences = self.normalized(raw)["preferences"]
 

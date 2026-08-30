@@ -1,0 +1,26 @@
+{
+  "session_schema_version": 1,
+  "series": "合成系列·偏好简报",
+  "regular_count": 12,
+  "designs": ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"],
+  "preferences": {
+    "strategy": "随便中个喜欢",
+    "scores": {
+      "A": 10,
+      "B": 8,
+      "C": 7,
+      "D": 6,
+      "E": 5,
+      "F": 1,
+      "G": 0,
+      "H": 0,
+      "I": -2,
+      "J": -3,
+      "K": -6,
+      "L": -10
+    },
+    "stop_rules": {"max_draws": 2}
+  },
+  "tools": {"hint_cards": 2, "display_cards": 1},
+  "meta": {"provenance": "synthetic"}
+}
