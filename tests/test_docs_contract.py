@@ -91,8 +91,17 @@ class DocsContractTests(unittest.TestCase):
             output = stdout.getvalue()
             if "--format markdown" in command:
                 self.assertTrue(output.startswith("# "), f"{doc}: {command}")
-                self.assertIn("## 结论", output, f"{doc}: {command}")
-                self.assertIn("## 下一步", output, f"{doc}: {command}")
+                if "--review-session" in command:
+                    # Whole-session reviews carry their own report shape.
+                    self.assertIn(
+                        "## 复盘结论", output, f"{doc}: {command}"
+                    )
+                    self.assertIn(
+                        "## 开盒逐次复盘", output, f"{doc}: {command}"
+                    )
+                else:
+                    self.assertIn("## 结论", output, f"{doc}: {command}")
+                    self.assertIn("## 下一步", output, f"{doc}: {command}")
             else:
                 json.loads(output)
             ran += 1

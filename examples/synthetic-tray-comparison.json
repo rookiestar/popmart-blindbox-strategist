@@ -1,0 +1,103 @@
+{
+  "session_schema_version": 1,
+  "series": "synthetic-tray-comparison",
+  "active_tray_id": "tray-1",
+  "accepted_tray_id": null,
+  "candidate_tray_id": null,
+  "draws_used": 1,
+  "preferences": {
+    "liked": ["A"],
+    "disliked": ["C", "D"],
+    "objective_mode": "target_only",
+    "tie_tolerance_pp": 0.0,
+    "stop_rules": {
+      "min_like_any_pp": 50,
+      "max_draws": 3
+    }
+  },
+  "tools": {
+    "hint_cards": 3,
+    "display_cards": 1
+  },
+  "trays": [
+    {
+      "id": "tray-1",
+      "model": {
+        "type": "unique_regular",
+        "designs": ["A", "B", "C", "D"]
+      },
+      "boxes": [
+        {"id": "1", "excluded": ["C", "D"], "status": "available"},
+        {"id": "2", "excluded": ["C", "D"], "status": "available"},
+        {"id": "3", "excluded": ["A", "B"], "status": "available"},
+        {"id": "4", "excluded": [], "status": "available"}
+      ]
+    },
+    {
+      "id": "tray-2",
+      "model": {
+        "type": "unique_regular",
+        "designs": ["A", "B", "C", "D"]
+      },
+      "boxes": [
+        {"id": "1", "excluded": ["C"], "status": "available"},
+        {"id": "2", "excluded": ["A"], "status": "available"},
+        {"id": "3", "excluded": ["D"], "status": "available"},
+        {"id": "4", "excluded": ["B"], "status": "available"}
+      ]
+    },
+    {
+      "id": "tray-3",
+      "participation": "history",
+      "model": {
+        "type": "unique_regular",
+        "designs": ["A", "B", "C", "D"]
+      },
+      "boxes": [
+        {"id": "1", "excluded": ["B"], "status": "available"},
+        {"id": "2", "excluded": ["A"], "status": "available"},
+        {"id": "3", "excluded": [], "status": "available"},
+        {"id": "4", "excluded": ["C", "D"], "status": "available"}
+      ]
+    },
+    {
+      "id": "tray-4",
+      "model": {
+        "type": "unique_regular",
+        "designs": ["A", "B", "C", "D"]
+      },
+      "boxes": [
+        {"id": "1", "excluded": ["B"], "status": "available"},
+        {"id": "2", "excluded": [], "status": "available"},
+        {"id": "3", "excluded": [], "status": "available"},
+        {"id": "4", "excluded": ["C"], "status": "available"}
+      ]
+    },
+    {
+      "id": "tray-5",
+      "model": {
+        "type": "unique_regular",
+        "designs": ["A", "B", "C", "D"]
+      },
+      "boxes": [
+        {"id": "1", "excluded": [], "known": "B", "status": "opened"},
+        {"id": "2", "excluded": [], "status": "sold_unknown"},
+        {"id": "3", "excluded": [], "status": "sold_unknown"},
+        {"id": "4", "excluded": [], "status": "sold_unknown"}
+      ]
+    }
+  ],
+  "events": [
+    {"seq": 1, "type": "tray_switch", "tray_id": "tray-4"},
+    {"seq": 2, "type": "tray_accepted", "tray_id": "tray-4"},
+    {"seq": 3, "type": "tray_released", "tray_id": "tray-4", "reason": "端上剩余盒位不理想，换端观察"},
+    {"seq": 4, "type": "tray_switch", "tray_id": "tray-5"},
+    {"seq": 5, "type": "tray_committed", "tray_id": "tray-5"},
+    {"seq": 6, "type": "opened_result", "tray_id": "tray-5", "box_id": "1", "design": "B"},
+    {"seq": 7, "type": "tray_released", "tray_id": "tray-5", "reason": "开盒后仅剩已售未知盒位，换端比较"},
+    {"seq": 8, "type": "tray_switch", "tray_id": "tray-1"}
+  ],
+  "meta": {
+    "provenance": "synthetic"
+  }
+}

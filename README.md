@@ -7,17 +7,21 @@
 - 查询系列常规款、官方信息和大陆二手市场参考；
 - 读取在线抽盒截图中的“不是”线索；
 - 从一张截图开始，逐步询问目标和逐款评分，自动分成七档；
+- 也可在进抽盒机前先给完整偏好，计算盲抽基线和可确认的参考线；
 - 用当前端真实可达概率生成边界选项，不要求你凭空估上限；
 - 按整端无重复模型计算每个盒位的精确概率；
 - 比较直接抽、停止、提示卡和显示卡；
 - 过滤低于实用收益门槛的卡片动作，避免为小数噪声浪费卡；
 - 跨多端保留各自线索，并统一计算剩余卡数和抽盒上限；
+- 可选地横向比较同系列多端；只给一端时直接进入原单端流程；
 - 锁定已达标的端，并审计释放与止损线变更；
 - 明示常规款范围和提示机制假设，不把条件概率写成确定事实；
 - 按你的喜好、硬雷和止损线推荐盒位；
 - 正式建议自动给出量化理由、TOP 3 全款概率矩阵、停止线和下一步；
 - 每得到一条新线索后重新计算；
-- 抽完后复盘“决策是否合理”和“结果是否走运”。
+- 抽完后复盘“决策是否合理”和“结果是否走运”；
+- 收官时回放整轮事件账本，逐次还原事前概率、用卡价值、承诺与止损线变更，
+  区分决策质量、结果质量和模型质量。
 
 支持六种直观策略：
 
@@ -106,6 +110,13 @@ A +10，B +7，C 0，D -6，E -10。
 我只有 3 分钟，这一端值得继续还是换端？
 ```
 
+想先定偏好和参考线：
+
+```text
+这是一端 12 盒的标准配置。策略随便中个喜欢；下面是完整逐款评分。
+最多抽 2 盒，提示卡 4 张。先给我盲抽基线和参考线。
+```
+
 
 ## 搜索与隐私
 
@@ -140,6 +151,22 @@ python3 scripts/blindbox_solver.py \
   --calibrate-preferences --format markdown
 ```
 
+无端偏好简报（先验基线与待确认参考线）：
+
+```bash
+python3 scripts/blindbox_solver.py \
+  examples/synthetic-preference-briefing.json \
+  --brief-preferences --format markdown
+```
+
+同系列多端横比（可选步骤）：
+
+```bash
+python3 scripts/blindbox_solver.py \
+  examples/synthetic-tray-comparison.json \
+  --compare-trays --format markdown
+```
+
 面向用户的完整决策报告（自动执行一道具规划并校验完整性）：
 
 ```bash
@@ -151,6 +178,14 @@ python3 scripts/blindbox_solver.py examples/minimal-demo.json --format markdown
 ```bash
 python3 scripts/blindbox_solver.py examples/minimal-demo.json \
   --screen-tray --format markdown
+```
+
+整轮自动复盘（回放事件账本，逐次给出事前概率与决策质量）：
+
+```bash
+python3 scripts/blindbox_solver.py \
+  examples/synthetic-session-review.json \
+  --review-session --format markdown
 ```
 
 千岛公开市场快照：

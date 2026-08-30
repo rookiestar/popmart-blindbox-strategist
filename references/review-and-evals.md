@@ -2,6 +2,12 @@
 
 Use this file after the user reports the purchased/opened result, or when validating a change to this skill.
 
+For a whole-session closing review, run `--review-session` first (template N
+in `references/output-templates.md`): the program replays the event ledger and
+produces every per-event number in this file's structure. Use the sections
+below to interpret it and to decide preference/skill updates; never recompute
+the numbers by hand.
+
 ## 1. Separate three judgments
 
 Never collapse these into one verdict.
@@ -293,7 +299,110 @@ backward-compatible non-calibration path. Exercise every guided A–E goal.
 add expected resale value plus `min_resale_ev`, personal-score, and risk
 boundaries. Numbered calibration schemes must not reuse the A–E goal letters.
 
+### E24 — Zero-tray preference briefing
+
+`--brief-preferences` accepts only zero-tray briefing states (`regular_count`
+plus preferences, no trays or boxes) and fails closed on incomplete design or
+score coverage, unconfirmed defaults, mixture models, or any duplicate JSON
+key. The report is the uniform complete no-duplicate blind baseline, carries
+`current_tray_not_observed`, and never claims current-tray attainability.
+Reference lines appear only for `随便中个喜欢` with a non-empty liked group and
+use five-point steps that strictly improve the baseline, with 40% / 35% / 20%
+balanced anchors for weak baselines; stop rules stay unmutated with
+`confirmation_required: true`, and
+explicit preference fields (including `explicit_score_tiers`) contradicting
+score tiers are listed with
+`confirmation_required`, and reference lines stay blocked. Run
+`tests/test_preference_briefing.py`.
+
+### E25 — Multi-tray comparison
+
+`--compare-trays` requires a session envelope with at least two observed trays
+from the same declared series and refuses planning, screening, calibration,
+and briefing modes. Each
+tray is solved independently — box ids, exclusions, sold-unknown boxes, and
+posteriors never cross trays — and the row metrics equal a solo run of the
+same tray. Released, `participation: "history"`, and zero-drawable trays are
+excluded from ranking and listed for review only. The table shows tray ID,
+best box, liked / any-disliked / hard-avoid metrics, status, first tool
+action, and the qualifying-branch probability labeled as not a win rate.
+Ranking reuses the existing strategy ordering and status precedence
+(ready < tool_dependent < switch < needs_acceptance_rules < session_stop)
+with tool-dependent trays ordered by qualifying-branch probability and
+fewer expected cards inside the practical tolerance; no new implicit
+strategy appears. Adding a second tray mid-session preserves preferences,
+quality lines, global tools, draws used, and prior tray evidence. Depth two
+is gated on at least two remaining cards, expands only the head candidates,
+and reports whether the first action changed. The validator rejects dropped
+or reordered rows (including strategy-order violations inside `ready`), rank
+gaps, non-top recommendations, guaranteed-improvement
+claims, win-rate semantics, and malformed depth-two sections. Run
+`tests/test_tray_comparison.py`.
+
+### E26 — Candidate-tray commitment and lossless upgrade
+
+Session trays move through a three-state ladder — open (未承诺) → candidate
+(候选承诺) → accepted (已接受) — and both locks live above the append-only
+ledger. Selecting a tool-dependent tray in a comparison records a candidate
+commitment (`tray_committed`) instead of pretending it directly qualifies.
+Multi-tray actions require that explicit event. Only a single-tray session may
+auto-insert `tray_committed` immediately before its first real action
+(`first_tool_or_open`). Once real clues push every quality line past its
+threshold, `tray_accepted` is added, `accepted_tray_id` is persisted, and the
+candidate is cleared (`quality_lines_upgrade`). Explicit acceptance remains
+the `explicit_event` path.
+Both locks gate switching — a reasoned `tray_released` event must precede any
+`tray_switch` away, and silent switches, releases without a reason,
+re-committing the locked tray, and actions on other trays while locked all
+fail closed. Preferences, quality lines, tool inventory, draw counts, and
+event order stay identical across commitment, upgrade, release, and
+switching, and counterfactual planning never mutates the real commitment.
+Legacy single-tray states with used tools or opened boxes normalize straight
+to candidate commitments without migration, and existing `accepted_tray_id`
+sessions keep reading unchanged. Standard reports and screening surface the
+phase in plain language (screening uses `candidate_review` /
+`accepted_review` with `release_before_switch`), and the validators reject
+tampered lifecycle blocks, mismatched locks, and dropped comparison
+commitment steps. Run `tests/test_tray_commitment.py`.
+
+### E27 — Whole-session automatic review
+
+`--review-session` generates the closing review by deterministically
+replaying the append-only event ledger — rewinding the final trays
+(un-opening boxes, un-using cards, restoring pre-override stop rules and the
+consumed card inventory), then re-applying every event in `seq` order with an
+ex-ante snapshot before each card and opening. It cannot be combined with
+planning flags, `--screen-tray`, `--calibrate-preferences`, `--compare-trays`,
+or `--brief-preferences`, and a zero-tray briefing is rejected. Every opening
+reports the actual design's ex-ante probability and rank among possible
+designs, the ex-ante liked / neutral / disliked (hard-avoid) class
+probabilities, the accepted failure probability under the declared objective,
+the quality lines as they stood (including pre-override thresholds), and the
+decision-time comparison with the strongest alternative — post-opening
+information never judges a choice. Every card reports its real result, the
+ex-ante still-drawable branch probability, the declared strategy's real primary
+metric before/after, ranking change, draw/stop decision change, and the
+remaining count. The lifecycle section lists every switch, commitment
+(explicit or single-tray `first_tool_or_open`), persisted
+`quality_lines_upgrade` acceptance, explicit acceptance, release, and
+stop-rule override with old value, new value, contiguous order, and reason.
+The report separates decision, outcome,
+and model quality, flags sunk-cost and gambler-fallacy patterns from ex-ante
+information only, cross-checks remaining cards / draws used / draw cap against
+the ledger, and ends with the declared model scope. Legacy states without an
+event ledger mark openings, cards, per-draw quality lines, and overrides as
+`legacy_state_without_event_ledger` 不可恢复 — no number is fabricated. The
+validator rejects fabricated legacy numbers, broken class partitions,
+rank/prior disagreements, missing strongest alternatives, branch-null
+mismatches, counter divergence, unknown verdicts, descending or duplicated
+lifecycle entries, and decision-quality divergence. Run
+`tests/test_session_review.py`.
+
 ## 7. Review output template
+
+For a single-draw follow-up review, fill in this shape from the standard
+report. For the whole-session closing review, relay the `--review-session`
+renderer output (template N) unchanged instead of this hand-filled skeleton.
 
 ```markdown
 ## 复盘结论
@@ -318,9 +427,9 @@ boundaries. Numbered calibration schemes must not reuse the A–E goal letters.
 
 [逐张区分 ex-ante 价值和随机结果。]
 
-## 锁定与止损线变更
+## 承诺与止损线变更
 
-[列接受/释放端，以及每次 stop_rule_override 的旧值、新值和理由。]
+[列承诺/接受/释放端及其理由（含候选承诺的自动记录与达线升级），以及每次 stop_rule_override 的旧值、新值和理由。]
 
 ## 真正需要更新的地方
 

@@ -40,7 +40,8 @@ python3 scripts/blindbox_solver.py <state.json> \
 | `ready` | 当前最佳盒直接通过全部质量入场线 | 保留此端，执行当前最优动作 |
 | `tool_dependent` | 直接未达线，但一步道具有非零概率产生可抽分支 | 仅在愿意消耗该卡时保留，并显示达线概率 |
 | `switch` | 直接未达线，且一步规划仍选择停止 | 不用卡，换端 |
-| `accepted_review` | 已锁定端后来未达线，原建议会换端 | 先复核；确认后记录释放，再换端 |
+| `candidate_review` | 候选承诺端未达线，原建议会换端 | 先复核；确认后记录释放，再换端 |
+| `accepted_review` | 已接受端后来未达线，原建议会换端 | 先复核；确认后记录释放，再换端 |
 | `session_stop` | 已达到整轮抽盒上限 | 停止整轮；换端无效 |
 | `needs_acceptance_rules` | 没有已确认质量入场线 | 先做评分校准并确认边界，不宣称端型好坏 |
 
@@ -48,15 +49,25 @@ python3 scripts/blindbox_solver.py <state.json> \
 `one_card_action.expected_draw_probability`，不要把“存在可救分支”写成高
 成功率，也不要因卡片免费或已持有就忽略其稀缺性。
 
-## 合格端锁定
+## 端承诺三态阶梯
 
-用户确认保留 `ready` 端后，设置 `accepted_tray_id` 并追加
-`tray_accepted`。锁定期间继续在该端计算；换端前必须先追加带理由的
-`tray_released` 并清空锁定。
+会话端的生命周期分三态：未承诺（可自由换端）→ 候选承诺（已选定，
+尚未达到全部质量线）→ 已接受（锁定）。
+
+- 多端横比里选出的 `tool_dependent` 端不是直接合格：选定后先追加
+  `tray_committed` 记录候选承诺，并设置 `candidate_tray_id`。
+- 单端上第一次真实用卡或开盒会自动记录候选承诺（来源
+  `first_tool_or_open`），不需要用户额外说“锁端”。
+- 真实线索让全部质量线通过后，追加 `tray_accepted`，设置
+  `accepted_tray_id` 并清空 `candidate_tray_id`（`quality_lines_upgrade`）；
+  用户显式确认使用 `explicit_event`。接受状态和事件账本保持一致。
+- 候选与已接受都是锁：换端前必须先追加带理由的 `tray_released` 并清空
+  对应字段；静默换端会被拒绝。全程不重置偏好、质量线、卡数、抽数和
+  历史证据。
 
 若新线索或显式止损线变更使锁定端原本会进入 `switch`，报告
-`accepted_review / release_before_switch`，保留未锁定时的原建议供复核，
-不自动绕过锁定。
+`candidate_review` 或 `accepted_review` 加 `release_before_switch`，保留
+未锁定时的原建议供复核，不自动绕过锁定。
 
 ## 下一端入场线
 
@@ -68,16 +79,20 @@ python3 scripts/blindbox_solver.py <state.json> \
 
 1. 每端独立建模，不合并盒号、排除或已售状态。
 2. 保留上一端的指标摘要用于复盘，但已释放的端不再列为可选项。
-3. 两端仍同时可占用时，才在同一策略和入场线下直接比较。
+3. 两端仍同时可占用时，才在同一策略和入场线下直接比较；会话状态中
+   已有至少两端且用户明确要求比较时，改用多端横比命令
+   （见 `references/output-templates.md` 模板 M），不由 Agent 手工拼表。
 
 ## 限时回复
 
 端筛选回复只给：
 
-- `直接可做 / 依赖道具 / 建议换端 / 本轮停止 / 需先设入场线`；
+- `直接可做 / 依赖道具 / 建议换端 / 本轮停止 / 需先设入场线`，
+  锁定端为 `候选复盘 / 接受复盘`；
 - 当前最佳盒及未达线差值；
 - 若依赖道具，首张卡、目标盒和用卡后仍可抽的概率；
-- 当前合格端锁定，以及换端前是否需要显式释放；
+- 当前端生命周期（未承诺 / 候选承诺 / 已接受），以及换端前是否需要
+  显式释放；
 - 下一端的质量入场线；
 - `隐藏款：默认未计入`。
 

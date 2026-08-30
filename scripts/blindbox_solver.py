@@ -21,6 +21,80 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
+try:
+    from scripts.session_lifecycle import (
+        COMMITMENT_SOURCES,
+        LifecycleError,
+        inject_derived_lifecycle_events,
+        reduce_lifecycle_events,
+        summarize_lifecycle,
+    )
+except ModuleNotFoundError:  # Direct execution: python scripts/blindbox_solver.py
+    from session_lifecycle import (  # type: ignore[no-redef]
+        COMMITMENT_SOURCES,
+        LifecycleError,
+        inject_derived_lifecycle_events,
+        reduce_lifecycle_events,
+        summarize_lifecycle,
+    )
+
+try:
+    from scripts.review_metrics import (
+        ReviewMetricError,
+        failure_probability as _pure_review_failure_probability,
+        outcome_class_probabilities as _pure_review_outcome_classes,
+        primary_metric_change as _pure_review_primary_metric_change,
+        quality_lines as _pure_review_quality_lines,
+        strongest_alternative as _pure_review_strongest_alternative,
+    )
+except ModuleNotFoundError:  # Direct execution from scripts/
+    from review_metrics import (  # type: ignore[no-redef]
+        ReviewMetricError,
+        failure_probability as _pure_review_failure_probability,
+        outcome_class_probabilities as _pure_review_outcome_classes,
+        primary_metric_change as _pure_review_primary_metric_change,
+        quality_lines as _pure_review_quality_lines,
+        strongest_alternative as _pure_review_strongest_alternative,
+    )
+
+try:
+    from scripts.blindbox_cli import COMPACT_BRANCH_KEYS
+except ModuleNotFoundError:  # Direct execution from scripts/
+    from blindbox_cli import COMPACT_BRANCH_KEYS  # type: ignore[no-redef]
+
+try:
+    from scripts.preference_policy import (
+        BRIEFING_BASELINE_METRIC_BY_RULE,
+        BRIEFING_REFERENCE_ANCHORS,
+        BRIEFING_REFERENCE_STEP_PP,
+        BRIEFING_RULE_LABELS,
+        SCORE_TIER_KEYS,
+        SCORE_TIER_LABELS,
+        SCORE_TIER_RANGES,
+        PreferencePolicyError,
+        briefing_reference_rules as _pure_briefing_reference_rules,
+        briefing_reference_value as _pure_briefing_reference_value,
+        build_score_tiers as _pure_build_score_tiers,
+        preference_tier_conflicts as _pure_preference_tier_conflicts,
+        score_tier as _pure_score_tier,
+    )
+except ModuleNotFoundError:  # Direct execution from scripts/
+    from preference_policy import (  # type: ignore[no-redef]
+        BRIEFING_BASELINE_METRIC_BY_RULE,
+        BRIEFING_REFERENCE_ANCHORS,
+        BRIEFING_REFERENCE_STEP_PP,
+        BRIEFING_RULE_LABELS,
+        SCORE_TIER_KEYS,
+        SCORE_TIER_LABELS,
+        SCORE_TIER_RANGES,
+        PreferencePolicyError,
+        briefing_reference_rules as _pure_briefing_reference_rules,
+        briefing_reference_value as _pure_briefing_reference_value,
+        build_score_tiers as _pure_build_score_tiers,
+        preference_tier_conflicts as _pure_preference_tier_conflicts,
+        score_tier as _pure_score_tier,
+    )
+
 
 class StateError(ValueError):
     """Raised when the input state is inconsistent or underspecified."""
@@ -78,22 +152,13 @@ STRATEGY_ALIASES = {
     "二手价值优先": "resale_ev",
 }
 
-SCORE_TIER_KEYS = (
-    "favorite",
-    "liked",
-    "acceptable",
-    "neutral",
-    "neutral_disappointed",
-    "light_dislike",
-    "hard_avoid",
-)
-
 SESSION_SCHEMA_VERSION = 1
 SESSION_EVENT_TYPES = {
     "tray_switch",
     "hint_used",
     "display_used",
     "opened_result",
+    "tray_committed",
     "tray_accepted",
     "tray_released",
     "stop_rule_override",
@@ -115,28 +180,43 @@ QUALITY_STOP_RULE_KEYS = (
     "max_dislike_any_pp",
     "max_hard_avoid_pp",
 )
+# Tray-level participation: "history" keeps a tray for review only. Released
+# and inoperable trays are derived from events and box states, not declared.
+TRAY_PARTICIPATION_MODES = {"active", "history"}
+# Tray commitment ladder between the plain active tray and the accepted tray:
+# a candidate commitment is "selected but not yet qualifying". It comes from
+# an explicit tray_committed event, or in single-tray mode an automatic event
+# immediately before the first real card/open, and upgrades to accepted once
+# real clues pass every quality line.
+TRAY_LIFECYCLE_PHASES = {"open", "candidate", "accepted"}
+TRAY_COMMITMENT_SOURCES = COMMITMENT_SOURCES
+TRAY_LIFECYCLE_PHASE_LABELS = {
+    "open": "未承诺（可自由换端）",
+    "candidate": "候选承诺（已选定，尚未达到全部质量线）",
+    "accepted": "已接受（锁定）",
+}
+TRAY_COMPARISON_STATUS_RANK = {
+    "ready": 0,
+    "tool_dependent": 1,
+    "switch": 2,
+    "needs_acceptance_rules": 3,
+    "session_stop": 4,
+}
+TRAY_COMPARISON_STATUS_LABELS = {
+    "ready": "直接可做",
+    "tool_dependent": "依赖道具",
+    "switch": "建议换端",
+    "session_stop": "本轮停止",
+    "needs_acceptance_rules": "需先设质量线",
+}
+TRAY_COMPARISON_EXCLUDED_REASONS = {
+    "released": "已释放",
+    "history": "历史只读",
+    "inoperable": "无可用盒",
+}
+COMPARISON_DEPTH_TWO_HEAD_CANDIDATES = 2
 HINT_MECHANISM_TYPES = {"uniform_wrong_label"}
 HINT_MECHANISM_STATUSES = {"assumed", "confirmed"}
-
-SCORE_TIER_LABELS = {
-    "favorite": "最爱",
-    "liked": "喜欢",
-    "acceptable": "可接受",
-    "neutral": "中性",
-    "neutral_disappointed": "中性但失望",
-    "light_dislike": "轻雷",
-    "hard_avoid": "硬雷",
-}
-SCORE_TIER_RANGES = {
-    "favorite": "+10",
-    "liked": "+6～+9",
-    "acceptable": "+1～+5",
-    "neutral": "0",
-    "neutral_disappointed": "-1～-4",
-    "light_dislike": "-5～-8",
-    "hard_avoid": "-9～-10",
-}
-
 
 @dataclass(frozen=True)
 class Scenario:
@@ -162,11 +242,29 @@ class PosteriorResult:
     exact_valid_assignments: Optional[int]
 
 
+def _reject_duplicate_json_keys(
+    pairs: Sequence[Tuple[str, Any]],
+) -> Dict[str, Any]:
+    """Build one JSON object while failing closed on duplicate keys."""
+    result: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise StateError(
+                f"duplicate JSON key {key!r}; repeated fields, including "
+                "conflicting design scores, must be resolved explicitly"
+            )
+        result[key] = value
+    return result
+
+
 def _read_json(path: str) -> Dict[str, Any]:
     if path == "-":
-        return json.load(sys.stdin)
+        return json.load(
+            sys.stdin,
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        return json.load(f, object_pairs_hook=_reject_duplicate_json_keys)
 
 
 def _stable_box_sort_key(box_id: str) -> Tuple[int, Any]:
@@ -185,34 +283,17 @@ def _bit_count(value: int) -> int:
 
 
 def _score_tier(score: float) -> str:
-    if score == 10:
-        return "favorite"
-    if 6 <= score < 10:
-        return "liked"
-    if 0 < score < 6:
-        return "acceptable"
-    if score == 0:
-        return "neutral"
-    if -5 < score < 0:
-        return "neutral_disappointed"
-    if -9 < score <= -5:
-        return "light_dislike"
-    if -10 <= score <= -9:
-        return "hard_avoid"
-    raise StateError("preference scores must be between -10 and 10")
+    try:
+        return _pure_score_tier(score)
+    except PreferencePolicyError as exc:
+        raise StateError(str(exc)) from exc
 
 
 def _build_score_tiers(scores: Mapping[str, float]) -> Dict[str, List[str]]:
-    tiers = {key: [] for key in SCORE_TIER_KEYS}
-    for label, score in scores.items():
-        tiers[_score_tier(score)].append(label)
-
-    for key in ("favorite", "liked", "acceptable"):
-        tiers[key].sort(key=lambda label: (-scores[label], label))
-    tiers["neutral"].sort()
-    for key in ("neutral_disappointed", "light_dislike", "hard_avoid"):
-        tiers[key].sort(key=lambda label: (scores[label], label))
-    return tiers
+    try:
+        return _pure_build_score_tiers(scores)
+    except PreferencePolicyError as exc:
+        raise StateError(str(exc)) from exc
 
 
 def _normalize_hint_mechanism(model: MutableMapping[str, Any]) -> Dict[str, str]:
@@ -380,6 +461,38 @@ def _normalize_state(raw: Mapping[str, Any]) -> Dict[str, Any]:
     explicit_liked = [str(x) for x in preferences.get("liked", [])]
     explicit_disliked = [str(x) for x in preferences.get("disliked", [])]
     explicit_hard_avoid = [str(x) for x in preferences.get("hard_avoid", [])]
+    raw_explicit_score_tiers = preferences.get("explicit_score_tiers", {})
+    if not isinstance(raw_explicit_score_tiers, Mapping):
+        raise StateError("preferences.explicit_score_tiers must be an object")
+    unknown_tier_keys = set(raw_explicit_score_tiers) - set(SCORE_TIER_KEYS)
+    if unknown_tier_keys:
+        raise StateError(
+            "preferences.explicit_score_tiers contains unknown tiers: "
+            f"{sorted(unknown_tier_keys)}"
+        )
+    explicit_score_tiers: Dict[str, List[str]] = {}
+    explicit_tier_designs: set[str] = set()
+    for tier, raw_members in raw_explicit_score_tiers.items():
+        if not isinstance(raw_members, list):
+            raise StateError(
+                f"preferences.explicit_score_tiers.{tier} must be a list"
+            )
+        members = [str(member) for member in raw_members]
+        duplicates = explicit_tier_designs & set(members)
+        if len(set(members)) != len(members) or duplicates:
+            raise StateError(
+                "a design may appear in only one explicit score tier: "
+                f"{sorted(duplicates or set(members))}"
+            )
+        unknown_members = set(members) - union_designs
+        if unknown_members:
+            raise StateError(
+                "preferences.explicit_score_tiers contains unknown designs: "
+                f"{sorted(unknown_members)}"
+            )
+        explicit_score_tiers[str(tier)] = members
+        explicit_tier_designs.update(members)
+    preferences["explicit_score_tiers"] = explicit_score_tiers
     requested_strategy = preferences.get("strategy")
     requested_mode = preferences.get("objective_mode")
     if requested_strategy is not None:
@@ -412,6 +525,22 @@ def _normalize_state(raw: Mapping[str, Any]) -> Dict[str, Any]:
             f"missing {state['_market_value_coverage']['missing_values']}"
         )
 
+    if "scores" in preferences and "utility_scores" in preferences:
+        dual_scores = preferences.get("scores")
+        legacy_scores = preferences.get("utility_scores")
+        if not isinstance(dual_scores, Mapping) or not isinstance(
+            legacy_scores, Mapping
+        ):
+            raise StateError(
+                "preferences.scores and preferences.utility_scores must be objects"
+            )
+        normalized_dual = {str(k): v for k, v in dual_scores.items()}
+        normalized_legacy = {str(k): v for k, v in legacy_scores.items()}
+        if normalized_dual != normalized_legacy:
+            raise StateError(
+                "preferences.scores conflicts with preferences.utility_scores; "
+                "a design cannot carry two different scores"
+            )
     raw_scores = preferences.get("scores", preferences.get("utility_scores", {}))
     if not isinstance(raw_scores, dict):
         raise StateError("preferences.scores must be an object")
@@ -446,7 +575,7 @@ def _normalize_state(raw: Mapping[str, Any]) -> Dict[str, Any]:
             raise StateError("preferences.score_default must be finite")
         _score_tier(score_default)
         preferences["score_default"] = score_default
-        if scores:
+        if score_default_confirmed:
             for design in union_designs:
                 scores.setdefault(design, score_default)
 
@@ -625,6 +754,7 @@ def _normalize_state(raw: Mapping[str, Any]) -> Dict[str, Any]:
         "missing_scores": sorted(union_designs - set(scores)),
         "filled_by_score_default": sorted(set(scores) - explicit_score_labels),
         "score_default_used": bool(set(scores) - explicit_score_labels),
+        "score_default_supplied": score_default_supplied,
         "score_default_confirmed": score_default_confirmed,
     }
     return state
@@ -697,7 +827,7 @@ def _normalize_session_event(
     event["type"] = event_type
     event["tray_id"] = tray_id
 
-    if event_type in {"tray_switch", "tray_accepted"}:
+    if event_type in {"tray_switch", "tray_committed", "tray_accepted"}:
         if "reason" in event:
             event["reason"] = str(event["reason"]).strip()
         return event
@@ -777,14 +907,147 @@ def _normalize_session_event(
     return event
 
 
+BRIEFING_DESIGN_SOURCE_KEYS = ("scores", "liked", "disliked", "hard_avoid")
+
+
+def _normalize_briefing(raw: Mapping[str, Any]) -> Dict[str, Any]:
+    """Normalize a zero-tray preference briefing.
+
+    A briefing collects series-level preferences before any tray is observed.
+    It is expanded into a synthetic tray with one unconstrained box per regular
+    design, so the posterior engine yields the exact uniform blind-draw
+    baseline without any box-position evidence. The synthetic boxes are
+    computational scaffolding only; they never reach a reader-facing report.
+    """
+    try:
+        version = int(raw.get("session_schema_version", SESSION_SCHEMA_VERSION))
+    except (TypeError, ValueError) as exc:
+        raise StateError("session_schema_version must be an integer") from exc
+    if version != SESSION_SCHEMA_VERSION:
+        raise StateError(
+            f"unsupported session_schema_version: {version}; "
+            f"expected {SESSION_SCHEMA_VERSION}"
+        )
+
+    try:
+        regular_count = int(raw["regular_count"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise StateError(
+            "preference briefing requires an integer regular_count"
+        ) from exc
+    if regular_count < 1:
+        raise StateError("briefing.regular_count must be at least 1")
+
+    raw_model = raw.get("model")
+    if raw_model is not None:
+        if not isinstance(raw_model, Mapping):
+            raise StateError("briefing.model must be an object")
+        if str(raw_model.get("type", "unique_regular")) != "unique_regular":
+            raise StateError(
+                "preference briefings require a complete regular design table; "
+                "mixture models need a real tray"
+            )
+
+    preferences = raw.get("preferences", {})
+    if not isinstance(preferences, Mapping):
+        raise StateError("briefing.preferences must be an object")
+    designs = raw.get("designs")
+    if designs is None and isinstance(raw_model, Mapping):
+        designs = raw_model.get("designs")
+    if designs is None:
+        mentioned: set[str] = set()
+        for key in BRIEFING_DESIGN_SOURCE_KEYS:
+            value = preferences.get(key)
+            if isinstance(value, Mapping):
+                mentioned.update(str(label) for label in value)
+            elif isinstance(value, list):
+                mentioned.update(str(label) for label in value)
+        market_values = raw.get("market_values")
+        if isinstance(market_values, Mapping):
+            mentioned.update(str(label) for label in market_values)
+        if not mentioned:
+            raise StateError(
+                "preference briefing requires designs, or preferences that "
+                "mention every regular design"
+            )
+        if len(mentioned) != regular_count:
+            raise StateError(
+                "briefing design coverage is incomplete: preferences mention "
+                f"{len(mentioned)} designs but regular_count is "
+                f"{regular_count}; refusing to guess the missing designs"
+            )
+        designs = sorted(mentioned)
+    if not isinstance(designs, list) or not designs:
+        raise StateError("briefing.designs must be a non-empty list")
+    design_list = [str(design) for design in designs]
+    if len(set(design_list)) != len(design_list):
+        raise StateError("briefing.designs contains duplicates")
+    if len(design_list) != regular_count:
+        raise StateError(
+            f"briefing.designs lists {len(design_list)} designs but "
+            f"regular_count is {regular_count}"
+        )
+
+    pseudo_state = {
+        "series": raw.get("series"),
+        "model": {"type": "unique_regular", "designs": design_list},
+        "boxes": [
+            {
+                "id": str(index + 1),
+                "excluded": [],
+                "known": None,
+                "status": AVAILABLE_STATUS,
+                "tool_used": False,
+            }
+            for index in range(regular_count)
+        ],
+        "preferences": copy.deepcopy(dict(preferences)),
+        "tools": copy.deepcopy(dict(raw.get("tools") or {})),
+        "market_values": copy.deepcopy(dict(raw.get("market_values") or {})),
+    }
+    state = _normalize_state(pseudo_state)
+    coverage = state["_score_coverage"]
+    if not coverage["complete"]:
+        if "score_default" in preferences and not coverage[
+            "score_default_confirmed"
+        ]:
+            raise StateError(
+                "preference briefing cannot fill omitted designs until "
+                "preferences.score_default_confirmed=true"
+            )
+        raise StateError(
+            "preference briefing requires complete scores for every regular "
+            f"design; missing {coverage['missing_scores']}"
+        )
+    return state
+
+
 def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
     """Normalize legacy state or a multi-tray session envelope.
 
     Legacy inputs become an implicit one-tray session internally while their
-    CLI report remains backward compatible.
+    CLI report remains backward compatible. Zero-tray preference briefings
+    normalize into a synthetic uniform tray for baseline math only.
     """
     if not isinstance(raw, Mapping):
         raise StateError("input must be a JSON object")
+
+    if "trays" not in raw and "boxes" not in raw and "regular_count" in raw:
+        state = _normalize_briefing(raw)
+        return {
+            "session_schema_version": SESSION_SCHEMA_VERSION,
+            "active_tray_id": None,
+            "accepted_tray_id": None,
+            "candidate_tray_id": None,
+            "tools": copy.deepcopy(state["tools"]),
+            "draws_used": 0,
+            "events": [],
+            "_legacy_input": False,
+            "_briefing_input": True,
+            "_briefing_state": state,
+            "_candidate_source": None,
+            "_auto_commitments": [],
+        }
 
     if "trays" not in raw:
         state = _normalize_state(raw)
@@ -796,15 +1059,37 @@ def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
         )
         state["_tray_id"] = tray_id
         state["_session_draws_used"] = draws_used
+        # Lossless state upgrade: a legacy single tray that already recorded a
+        # real card or open is auto-committed as the candidate without asking
+        # the user to say "lock the tray".
+        legacy_committed = any(
+            box["tool_used"] or box["status"] == "opened"
+            for box in state["boxes"]
+        )
         return {
             "session_schema_version": SESSION_SCHEMA_VERSION,
             "active_tray_id": tray_id,
             "accepted_tray_id": None,
+            "candidate_tray_id": tray_id if legacy_committed else None,
             "tools": copy.deepcopy(state["tools"]),
             "draws_used": draws_used,
             "events": [],
             "_legacy_input": True,
             "_tray_states": {tray_id: state},
+            "_candidate_source": (
+                "first_tool_or_open" if legacy_committed else None
+            ),
+            "_auto_commitments": (
+                [
+                    {
+                        "tray_id": tray_id,
+                        "source": "first_tool_or_open",
+                        "basis": "legacy_state_tool_used_or_opened_box",
+                    }
+                ]
+                if legacy_committed
+                else []
+            ),
         }
 
     try:
@@ -831,6 +1116,8 @@ def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
         shared["tools"] = {}
 
     tray_states: Dict[str, Dict[str, Any]] = {}
+    tray_participations: Dict[str, str] = {}
+    canonical_series = shared.get("series")
     for raw_tray in raw_trays:
         if not isinstance(raw_tray, Mapping):
             raise StateError("each session tray must be an object")
@@ -840,6 +1127,22 @@ def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
             raise StateError("each session tray requires a non-empty id")
         if tray_id in tray_states:
             raise StateError(f"duplicate tray id: {tray_id}")
+        participation = tray.pop("participation", "active")
+        if participation not in TRAY_PARTICIPATION_MODES:
+            raise StateError(
+                f"tray {tray_id}: participation must be one of "
+                f"{sorted(TRAY_PARTICIPATION_MODES)}"
+            )
+        tray_series = tray.pop("series", None)
+        if tray_series not in (None, ""):
+            tray_series = str(tray_series)
+            if canonical_series in (None, ""):
+                canonical_series = tray_series
+                shared["series"] = tray_series
+            elif str(canonical_series) != tray_series:
+                raise StateError(
+                    "multi-tray sessions require every tray to use the same series"
+                )
         duplicated_globals = sorted(
             key for key in ("preferences", "tools", "market_values") if key in tray
         )
@@ -852,6 +1155,7 @@ def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
         state = _normalize_state(tray_raw)
         state["_tray_id"] = tray_id
         tray_states[tray_id] = state
+        tray_participations[tray_id] = str(participation)
 
     active_tray_id = str(raw.get("active_tray_id", "")).strip()
     if active_tray_id not in tray_states:
@@ -864,6 +1168,20 @@ def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
     )
     if accepted_tray_id is not None and accepted_tray_id not in tray_states:
         raise StateError("accepted_tray_id must identify one session tray")
+    # candidate_tray_id is optional: when absent it is filled losslessly from
+    # the derived commitment (explicit event or first real card/open), so old
+    # session states keep normalizing without migration.
+    raw_candidate_tray_id = raw.get("candidate_tray_id")
+    explicit_candidate_tray_id = (
+        None
+        if raw_candidate_tray_id in (None, "")
+        else str(raw_candidate_tray_id).strip()
+    )
+    if explicit_candidate_tray_id is not None:
+        if explicit_candidate_tray_id not in tray_states:
+            raise StateError(
+                "candidate_tray_id must identify one session tray"
+            )
 
     opened_total = sum(
         1
@@ -891,68 +1209,64 @@ def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
         _normalize_session_event(event, index, tray_states)
         for index, event in enumerate(raw_events, start=1)
     ]
+    try:
+        raw_lifecycle = reduce_lifecycle_events(
+            events,
+            tray_count=len(tray_states),
+        )
+    except LifecycleError as exc:
+        raise StateError(str(exc)) from exc
     tool_event_boxes: set[Tuple[str, str]] = set()
     opened_event_boxes: set[Tuple[str, str]] = set()
-    lifecycle_lock: Optional[str] = None
-    current_event_tray: Optional[str] = None
     override_chains: Dict[str, List[Dict[str, Any]]] = {}
     for event in events:
         event_type = event["type"]
-        tray_id = event["tray_id"]
-        if event_type == "tray_switch":
-            if lifecycle_lock is not None and tray_id != lifecycle_lock:
-                raise StateError(
-                    "release the accepted tray before switching to another tray"
-                )
-            current_event_tray = tray_id
-        elif event_type == "tray_accepted":
-            if current_event_tray is not None and tray_id != current_event_tray:
-                raise StateError(
-                    "tray_accepted must target the current event tray"
-                )
-            if lifecycle_lock is not None:
-                raise StateError(
-                    "release the accepted tray before accepting another tray"
-                )
-            lifecycle_lock = tray_id
-        elif event_type == "tray_released":
-            if lifecycle_lock != tray_id:
-                raise StateError(
-                    "tray_released must target the currently accepted tray"
-                )
-            lifecycle_lock = None
-        elif event_type == "stop_rule_override":
-            if (
-                current_event_tray is not None
-                and tray_id != current_event_tray
-            ):
-                raise StateError(
-                    "stop_rule_override must target the current event tray"
-                )
+        if event_type == "stop_rule_override":
             override_chains.setdefault(event["rule"], []).append(event)
-        elif event_type in {"hint_used", "display_used"}:
-            key = (event["tray_id"], event["box_id"])
-            if key in tool_event_boxes or key in opened_event_boxes:
-                raise StateError(
-                    "session events must record at most one tool before opening "
-                    f"box {key[1]!r} in tray {key[0]!r}"
-                )
-            tool_event_boxes.add(key)
-        elif event_type == "opened_result":
-            key = (event["tray_id"], event["box_id"])
-            if key in opened_event_boxes:
-                raise StateError(
-                    f"session events repeat opened_result for tray/box {key}"
-                )
-            opened_event_boxes.add(key)
+        elif event_type in {"hint_used", "display_used", "opened_result"}:
+            if event_type in {"hint_used", "display_used"}:
+                key = (event["tray_id"], event["box_id"])
+                if key in tool_event_boxes or key in opened_event_boxes:
+                    raise StateError(
+                        "session events must record at most one tool before "
+                        f"opening box {key[1]!r} in tray {key[0]!r}"
+                    )
+                tool_event_boxes.add(key)
+            else:
+                key = (event["tray_id"], event["box_id"])
+                if key in opened_event_boxes:
+                    raise StateError(
+                        f"session events repeat opened_result for tray/box {key}"
+                    )
+                opened_event_boxes.add(key)
 
-    if lifecycle_lock != accepted_tray_id:
+    if raw_lifecycle["accepted_tray_id"] != accepted_tray_id:
         raise StateError(
             "accepted_tray_id must match the tray acceptance/release event history"
+        )
+    if explicit_candidate_tray_id is not None:
+        if explicit_candidate_tray_id != raw_lifecycle["candidate_tray_id"]:
+            raise StateError(
+                "candidate_tray_id must match the tray commitment event history"
+            )
+    if (
+        raw_lifecycle["candidate_tray_id"] is not None
+        and raw_lifecycle["accepted_tray_id"] is not None
+    ):
+        raise StateError(
+            "a session cannot hold both a candidate and an accepted tray"
         )
     if accepted_tray_id is not None and accepted_tray_id != active_tray_id:
         raise StateError(
             "the accepted tray must remain active until an explicit release event"
+        )
+    if (
+        raw_lifecycle["candidate_tray_id"] is not None
+        and raw_lifecycle["candidate_tray_id"] != active_tray_id
+    ):
+        raise StateError(
+            "the candidate tray must remain active until an explicit release "
+            "event"
         )
 
     final_stop_rules = tray_states[active_tray_id]["preferences"]["stop_rules"]
@@ -996,16 +1310,68 @@ def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
         )
 
     active_state = tray_states[active_tray_id]
-    return {
+    provisional = {
         "session_schema_version": version,
+        "series": active_state.get("series"),
         "active_tray_id": active_tray_id,
-        "accepted_tray_id": accepted_tray_id,
+        "accepted_tray_id": raw_lifecycle["accepted_tray_id"],
+        "candidate_tray_id": raw_lifecycle["candidate_tray_id"],
         "tools": copy.deepcopy(active_state["tools"]),
         "draws_used": draws_used,
         "events": events,
         "_legacy_input": False,
         "_tray_states": tray_states,
+        "_tray_participations": tray_participations,
+        "_candidate_source": raw_lifecycle["candidate_source"],
+        "_accepted_source": raw_lifecycle["accepted_source"],
+        "_accepted_commitment_source": raw_lifecycle[
+            "accepted_commitment_source"
+        ],
+        "_auto_commitments": raw_lifecycle["auto_commitments"],
+        "_auto_acceptances": [],
     }
+    acceptance_points = _derived_acceptance_points(provisional)
+    canonical = inject_derived_lifecycle_events(
+        events,
+        auto_commitments=raw_lifecycle["auto_commitments"],
+        acceptance_points=acceptance_points,
+    )
+    try:
+        final_lifecycle = reduce_lifecycle_events(
+            canonical["events"],
+            tray_count=len(tray_states),
+        )
+    except LifecycleError as exc:
+        raise StateError(str(exc)) from exc
+    if (
+        final_lifecycle["accepted_tray_id"] is not None
+        and final_lifecycle["accepted_tray_id"] != active_tray_id
+    ):
+        raise StateError(
+            "the accepted tray must remain active until an explicit release event"
+        )
+    if (
+        final_lifecycle["candidate_tray_id"] is not None
+        and final_lifecycle["candidate_tray_id"] != active_tray_id
+    ):
+        raise StateError(
+            "the candidate tray must remain active until an explicit release event"
+        )
+    provisional.update(
+        {
+            "accepted_tray_id": final_lifecycle["accepted_tray_id"],
+            "candidate_tray_id": final_lifecycle["candidate_tray_id"],
+            "events": canonical["events"],
+            "_candidate_source": final_lifecycle["candidate_source"],
+            "_accepted_source": final_lifecycle["accepted_source"],
+            "_accepted_commitment_source": final_lifecycle[
+                "accepted_commitment_source"
+            ],
+            "_auto_commitments": canonical["auto_commitments"],
+            "_auto_acceptances": canonical["auto_acceptances"],
+        }
+    )
+    return provisional
 
 
 def _scenario_analysis(state: Mapping[str, Any], scenario: Scenario) -> ScenarioResult:
@@ -2787,6 +3153,15 @@ def build_preference_calibration_report(
 ) -> Dict[str, Any]:
     """Build a score-first boundary calibration without a draw recommendation."""
     coverage = copy.deepcopy(state["_score_coverage"])
+    if (
+        coverage.get("score_default_supplied")
+        and not coverage["score_default_confirmed"]
+        and not coverage["complete"]
+    ):
+        raise StateError(
+            "preference calibration cannot fill omitted designs until "
+            "preferences.score_default_confirmed=true"
+        )
     if not coverage["complete"]:
         raise StateError(
             "preference calibration requires every design to have a score; "
@@ -2903,6 +3278,26 @@ def build_preference_calibration_report(
     }
 
 
+def _session_lifecycle_summary(
+    *,
+    accepted_tray_id: Optional[str],
+    candidate_tray_id: Optional[str],
+    commitment_source: Optional[str],
+    candidate_qualified: bool,
+    accepted_source: Optional[str] = None,
+    accepted_commitment_source: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Compatibility wrapper around the shared pure lifecycle summary."""
+    return summarize_lifecycle(
+        accepted_tray_id=accepted_tray_id,
+        candidate_tray_id=candidate_tray_id,
+        commitment_source=commitment_source,
+        accepted_source=accepted_source,
+        accepted_commitment_source=accepted_commitment_source,
+        candidate_qualified=candidate_qualified,
+    )
+
+
 def build_session_report(
     session: Mapping[str, Any],
     include_plan: bool = False,
@@ -2913,6 +3308,8 @@ def build_session_report(
     """Build one reader-facing report that preserves every tray."""
     active_tray_id = session["active_tray_id"]
     accepted_tray_id = session["accepted_tray_id"]
+    candidate_tray_id = session.get("candidate_tray_id")
+    commitment_source = session.get("_candidate_source")
     tray_reports: Dict[str, Dict[str, Any]] = {}
     for tray_id, state in session["_tray_states"].items():
         is_active = tray_id == active_tray_id
@@ -2936,14 +3333,35 @@ def build_session_report(
                 tray_reports[tray_id]["ranking"][0],
             )
             decision = tray_reports[tray_id]["draw_decision"]
+        currently_qualified = (
+            bool(profile)
+            and decision["should_draw"]
+            and all(check["passed"] for check in profile)
+        )
+        is_accepted = tray_id == accepted_tray_id
+        is_candidate = (
+            not is_accepted
+            and candidate_tray_id is not None
+            and tray_id == candidate_tray_id
+        )
         tray_reports[tray_id]["tray_lock"] = {
-            "is_accepted": tray_id == accepted_tray_id,
+            "is_accepted": is_accepted,
+            "is_candidate": is_candidate,
+            "phase": (
+                "accepted"
+                if is_accepted
+                else "candidate"
+                if is_candidate
+                else "uncommitted"
+            ),
             "accepted_tray_id": accepted_tray_id,
-            "release_required_before_switch": accepted_tray_id is not None,
-            "currently_qualified": (
-                bool(profile)
-                and decision["should_draw"]
-                and all(check["passed"] for check in profile)
+            "candidate_tray_id": candidate_tray_id,
+            "release_required_before_switch": (
+                accepted_tray_id is not None or candidate_tray_id is not None
+            ),
+            "currently_qualified": currently_qualified,
+            "commitment_source": (
+                commitment_source if is_candidate else None
             ),
         }
 
@@ -2965,13 +3383,32 @@ def build_session_report(
             "one_card_action"
         ]
 
-    if accepted_tray_id is None:
-        session_recommendation = {
-            "action": "follow_active_tray_report",
-            "tray_id": active_tray_id,
-            "release_required_before_switch": False,
-        }
-    else:
+    active_currently_qualified = tray_reports[active_tray_id]["tray_lock"][
+        "currently_qualified"
+    ]
+    lifecycle = _session_lifecycle_summary(
+        accepted_tray_id=accepted_tray_id,
+        candidate_tray_id=candidate_tray_id,
+        commitment_source=commitment_source,
+        candidate_qualified=bool(active_currently_qualified),
+        accepted_source=session.get("_accepted_source"),
+        accepted_commitment_source=session.get(
+            "_accepted_commitment_source"
+        ),
+    )
+    # The derived candidate upgrade behaves exactly like an explicit
+    # acceptance for every recommendation that follows.
+    effective_accepted_tray_id = (
+        accepted_tray_id
+        if accepted_tray_id is not None
+        else (
+            candidate_tray_id
+            if lifecycle["upgraded_from_candidate"]
+            else None
+        )
+    )
+
+    if lifecycle["phase"] == "accepted":
         session_recommendation = {
             "action": (
                 "continue_with_accepted_tray"
@@ -2989,17 +3426,52 @@ def build_session_report(
                     else "stop_or_release_accepted_tray"
                 )
             ),
-            "tray_id": accepted_tray_id,
+            "tray_id": effective_accepted_tray_id,
             "release_required_before_switch": True,
         }
         screening = active_report.get("tray_screening")
         if screening is not None:
-            screening["accepted_tray_id"] = accepted_tray_id
+            screening["accepted_tray_id"] = effective_accepted_tray_id
             screening["release_required_before_switch"] = True
             if screening["recommendation"] == "switch":
                 screening["unlocked_recommendation"] = "switch"
                 screening["status"] = "accepted_review"
                 screening["recommendation"] = "release_before_switch"
+    elif lifecycle["phase"] == "candidate":
+        session_recommendation = {
+            "action": (
+                "continue_with_candidate_tray"
+                if active_decision["should_draw"]
+                else (
+                    "continue_with_candidate_tray_tool_plan"
+                    if (
+                        active_tool_action is not None
+                        and active_tool_action["tool"] != "none"
+                        and float(
+                            active_tool_action["expected_draw_probability"]
+                        )
+                        > 0
+                    )
+                    else "stop_or_release_candidate_tray"
+                )
+            ),
+            "tray_id": candidate_tray_id,
+            "release_required_before_switch": True,
+        }
+        screening = active_report.get("tray_screening")
+        if screening is not None:
+            screening["candidate_tray_id"] = candidate_tray_id
+            screening["release_required_before_switch"] = True
+            if screening["recommendation"] == "switch":
+                screening["unlocked_recommendation"] = "switch"
+                screening["status"] = "candidate_review"
+                screening["recommendation"] = "release_before_switch"
+    else:
+        session_recommendation = {
+            "action": "follow_active_tray_report",
+            "tray_id": active_tray_id,
+            "release_required_before_switch": False,
+        }
 
     acceptance_events = [
         copy.deepcopy(event)
@@ -3016,9 +3488,9 @@ def build_session_report(
             "session_schema_version": session["session_schema_version"],
             "active_tray_id": active_tray_id,
             "accepted_tray_id": accepted_tray_id,
-            "lock_status": (
-                "accepted" if accepted_tray_id is not None else "open"
-            ),
+            "candidate_tray_id": candidate_tray_id,
+            "lock_status": lifecycle["phase"],
+            "tray_lifecycle": lifecycle,
             "tray_ids": list(session["_tray_states"]),
             "tools": copy.deepcopy(session["tools"]),
             "draws_used": session["draws_used"],
@@ -3031,9 +3503,1453 @@ def build_session_report(
         "actual_events": copy.deepcopy(session["events"]),
         "session_review": {
             "acceptance_lifecycle": acceptance_events,
+            "commitment_lifecycle": {
+                "commit_events": [
+                    copy.deepcopy(event)
+                    for event in session["events"]
+                    if event["type"] == "tray_committed"
+                ],
+                "auto_commitments": copy.deepcopy(
+                    session.get("_auto_commitments") or []
+                ),
+                "phase": lifecycle["phase"],
+                "upgraded_from_candidate": lifecycle[
+                    "upgraded_from_candidate"
+                ],
+            },
             "stop_rule_overrides": stop_rule_overrides,
         },
     }
+
+
+def _tray_comparison_row(
+    tray_id: str,
+    state: Mapping[str, Any],
+    *,
+    beam_width: int,
+) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+    """Assess one tray independently and derive its comparison sort key.
+
+    The key never mixes tuple shapes across status classes: the status rank
+    resolves first, and the tail is only compared between trays of the same
+    status. Ready trays reuse the exact strategy ordering keys; tool-dependent
+    trays lead with the probability of a fully qualifying branch.
+    """
+    posterior = analyze_posterior(state)
+    best = available_box_metrics(state, posterior)[0]
+    tool_plan = plan_tools(state, posterior, depth=1, beam_width=beam_width)
+    assessment = assess_tray(state, best, tool_plan)
+    action = tool_plan["recommended_action"]
+    terminal = action["expected_terminal_metrics"]
+    status = assessment["status"]
+    status_rank = TRAY_COMPARISON_STATUS_RANK[status]
+    tol = state["preferences"]["tie_tolerance_pp"] / 100.0
+    if status == "tool_dependent":
+        primary_value, _ = _primary_tool_metric(terminal, state)
+        tail: Tuple[Any, ...] = (
+            -_probability_bucket(
+                float(action["expected_draw_probability"]), tol
+            ),
+            -_probability_bucket(primary_value, tol),
+            float(terminal["p_dislike_any"]),
+            float(terminal["p_hard_avoid"]),
+            round(float(action.get("expected_tools_used", 0.0)), 12),
+            tray_id,
+        )
+    else:
+        tail = (metric_comparison_key(best, state), tray_id)
+    row = {
+        "tray_id": tray_id,
+        "status": status,
+        "status_label": TRAY_COMPARISON_STATUS_LABELS[status],
+        "direct_best_box_id": best["box_id"],
+        "metrics": {
+            "p_like_any_pp": 100.0 * float(best["p_like_any"]),
+            "p_favorite_any_pp": 100.0 * float(best["p_favorite_any"]),
+            "p_dislike_any_pp": 100.0 * float(best["p_dislike_any"]),
+            "p_hard_avoid_pp": 100.0 * float(best["p_hard_avoid"]),
+            "expected_score": best.get("expected_score"),
+            "resale_ev": best.get("resale_ev"),
+        },
+        "acceptance_profile": assessment["acceptance_profile"],
+        "first_tool_action": _action_summary(action),
+        "post_tool_draw_probability_pp": 100.0
+        * float(action["expected_draw_probability"]),
+        "expected_tools_used": float(
+            action.get("expected_tools_used", 0.0)
+        ),
+        "drawable_box_count": sum(
+            1 for box in state["boxes"] if box["status"] in DRAWABLE_STATUSES
+        ),
+        "tray_opened_count": sum(
+            1 for box in state["boxes"] if box["status"] == "opened"
+        ),
+    }
+    sort_key = (status_rank, tail)
+    row["strategy_ranking_key"] = _comparison_key_to_json(sort_key)
+    return sort_key, row
+
+
+def _comparison_key_to_json(value: Any) -> Any:
+    """Convert a nested tuple sort key into a JSON-stable list tree."""
+    if isinstance(value, tuple):
+        return [_comparison_key_to_json(item) for item in value]
+    return value
+
+
+def _comparison_key_from_json(value: Any) -> Any:
+    """Freeze a JSON list tree back into a comparable tuple tree."""
+    if isinstance(value, list):
+        return tuple(_comparison_key_from_json(item) for item in value)
+    if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+        return value
+    raise ValueError("comparison ranking keys contain only lists and scalars")
+
+
+def build_tray_comparison_report(
+    session: Mapping[str, Any],
+    compare_depth: int = 1,
+    beam_width: int = 3,
+) -> Dict[str, Any]:
+    """Compare every still-operable tray under the shared strategy and lines.
+
+    Each tray is solved independently; released, history, and inoperable trays
+    stay out of the action ranking and are reported for review only.
+    """
+    if compare_depth not in {1, 2}:
+        raise StateError("comparison planning depth must be 1 or 2")
+    tray_states = session["_tray_states"]
+    if len(tray_states) < 2:
+        raise StateError(
+            "tray comparison needs a session with at least two trays; a "
+            "single tray keeps using --screen-tray or the formal report"
+        )
+    series_values = {
+        str(state.get("series", "")).strip()
+        for state in tray_states.values()
+    }
+    if len(series_values) != 1 or not next(iter(series_values), ""):
+        raise StateError(
+            "tray comparison requires every tray to declare the same series"
+        )
+    participations = session.get("_tray_participations", {})
+    released_tray_ids = {
+        event["tray_id"]
+        for event in session["events"]
+        if event["type"] == "tray_released"
+    }
+
+    ranked_pairs: List[Tuple[Tuple[Any, ...], Dict[str, Any]]] = []
+    excluded_trays: List[Dict[str, Any]] = []
+    for tray_id, state in tray_states.items():
+        drawable = sum(
+            1 for box in state["boxes"] if box["status"] in DRAWABLE_STATUSES
+        )
+        # Inoperable is the physical fact: with no drawable box the tray
+        # supports no action regardless of its lifecycle state.
+        if drawable == 0:
+            reason = "inoperable"
+        elif tray_id in released_tray_ids:
+            reason = "released"
+        elif participations.get(tray_id, "active") == "history":
+            reason = "history"
+        else:
+            reason = None
+        if reason is not None:
+            excluded_trays.append(
+                {
+                    "tray_id": tray_id,
+                    "reason": reason,
+                    "reason_label": TRAY_COMPARISON_EXCLUDED_REASONS[reason],
+                    "drawable_box_count": drawable,
+                    "opened_box_count": sum(
+                        1
+                        for box in state["boxes"]
+                        if box["status"] == "opened"
+                    ),
+                }
+            )
+            continue
+        sort_key, row = _tray_comparison_row(
+            tray_id, state, beam_width=beam_width
+        )
+        row["is_active_tray"] = tray_id == session["active_tray_id"]
+        row["is_accepted_tray"] = tray_id == session["accepted_tray_id"]
+        row["is_candidate_tray"] = (
+            tray_id == session.get("candidate_tray_id")
+            and not row["is_accepted_tray"]
+        )
+        ranked_pairs.append((sort_key, row))
+
+    ranked_pairs.sort(key=lambda item: item[0])
+    rows = [row for _, row in ranked_pairs]
+    for rank, row in enumerate(rows, start=1):
+        row["rank"] = rank
+
+    candidate_tray_id = session.get("candidate_tray_id")
+    candidate_row = next(
+        (row for row in rows if row["tray_id"] == candidate_tray_id), None
+    )
+    lifecycle = _session_lifecycle_summary(
+        accepted_tray_id=session["accepted_tray_id"],
+        candidate_tray_id=candidate_tray_id,
+        commitment_source=session.get("_candidate_source"),
+        candidate_qualified=(
+            candidate_row is not None and candidate_row["status"] == "ready"
+        ),
+        accepted_source=session.get("_accepted_source"),
+        accepted_commitment_source=session.get(
+            "_accepted_commitment_source"
+        ),
+    )
+
+    depth_two: Optional[Dict[str, Any]] = None
+    if compare_depth == 2:
+        total_cards = (
+            session["tools"]["hint_cards"]
+            + session["tools"]["display_cards"]
+        )
+        if total_cards < 2:
+            raise StateError(
+                "depth-two comparison requires at least two available cards; "
+                "rerun with --compare-depth 1"
+            )
+        head_ids = [
+            row["tray_id"]
+            for row in rows[:COMPARISON_DEPTH_TWO_HEAD_CANDIDATES]
+        ]
+        for tray_id in head_ids:
+            state = tray_states[tray_id]
+            posterior = analyze_posterior(state)
+            plan = plan_tools(
+                state, posterior, depth=2, beam_width=beam_width
+            )
+            one_card = plan_tools(
+                state, posterior, depth=1, beam_width=beam_width
+            )
+            primary_gain_pp, primary_metric = _primary_tool_uplift_pp(
+                plan["recommended_action"]["expected_terminal_metrics"],
+                one_card["recommended_action"]["expected_terminal_metrics"],
+                state,
+            )
+            row = next(row for row in rows if row["tray_id"] == tray_id)
+            row["depth_two_detail"] = {
+                "recommended_action": _action_summary(
+                    plan["recommended_action"]
+                ),
+                "first_action_changed_vs_depth_1": plan[
+                    "first_action_changed_vs_depth_1"
+                ],
+                "terminal_value_practically_equivalent_to_depth_1": plan[
+                    "terminal_value_practically_equivalent_to_depth_1"
+                ],
+                "primary_gain_vs_one_card_pp": primary_gain_pp,
+                "primary_metric": primary_metric,
+                "gain_vs_one_card_horizon": plan[
+                    "gain_vs_one_card_horizon"
+                ],
+            }
+        for row in rows:
+            if "depth_two_detail" not in row:
+                row["depth_two_note"] = (
+                    "两步规划只扩展排名最靠前的端；本端保持一步时域结果。"
+                )
+        depth_two = {
+            "head_candidate_tray_ids": head_ids,
+            "cards_available": int(total_cards),
+            "horizon_note": (
+                "横比默认一步规划；本报告仅对头部候选端扩展两步时域，"
+                "并单独标注首步动作是否变化。"
+            ),
+        }
+
+    recommendation: Dict[str, Any]
+    if rows:
+        top = rows[0]
+        planning_horizon = "one_card"
+        comparison_basis = "one_step"
+        first_action = top["first_tool_action"]
+        if compare_depth == 2 and "depth_two_detail" in top:
+            first_action = top["depth_two_detail"]["recommended_action"]
+            planning_horizon = "two_card"
+            comparison_basis = "two_step_head_candidates"
+        non_actionable = top["status"] in {
+            "switch",
+            "session_stop",
+            "needs_acceptance_rules",
+        }
+        recommendation = {
+            "recommended_tray_id": top["tray_id"],
+            "status": top["status"],
+            "first_action": None if non_actionable else first_action,
+            "action": "stop_or_review" if non_actionable else "execute_first_action",
+            "planning_horizon": planning_horizon,
+            "comparison_basis": comparison_basis,
+            "release_required_before_switch": (
+                (
+                    session["accepted_tray_id"] is not None
+                    and session["accepted_tray_id"] != top["tray_id"]
+                )
+                or (
+                    candidate_tray_id is not None
+                    and candidate_tray_id != top["tray_id"]
+                )
+            ),
+            "future_tray_improvement_guaranteed": False,
+        }
+        if non_actionable:
+            recommendation["action_reason"] = (
+                "靠前端没有可直接执行的动作：建议停止本轮或先补齐质量线/端信息。"
+            )
+        elif (
+            top["status"] == "tool_dependent"
+            and session["accepted_tray_id"] != top["tray_id"]
+            and candidate_tray_id != top["tray_id"]
+        ):
+            # Selecting a tool-dependent tray records a candidate commitment;
+            # it is never disguised as directly qualified.
+            recommendation["commitment_after_action"] = {
+                "phase": "candidate",
+                "record_event": "tray_committed",
+                "note": (
+                    "选定该端后记录候选承诺（依赖道具，不是直接合格）；"
+                    "真实线索通过全部质量线后升级为已接受。"
+                ),
+            }
+    else:
+        recommendation = {
+            "recommended_tray_id": None,
+            "status": None,
+            "first_action": None,
+            "action": "stop_or_review",
+            "planning_horizon": "one_card" if compare_depth == 1 else "two_card",
+            "comparison_basis": "no_operable_trays",
+            "release_required_before_switch": False,
+            "future_tray_improvement_guaranteed": False,
+        }
+
+    model_tray_id = recommendation["recommended_tray_id"] or session[
+        "active_tray_id"
+    ]
+    model_state = tray_states[model_tray_id]
+    model_contract, model_warnings = _model_reporting_contract(
+        model_state,
+        hint_planning_active=(
+            model_state["tools"]["hint_cards"] > 0
+            and any(
+                box["status"] == AVAILABLE_STATUS
+                and not box["tool_used"]
+                and box["known"] is None
+                for box in model_state["boxes"]
+            )
+        ),
+    )
+    comparison: Dict[str, Any] = {
+        "planning_depth": compare_depth,
+        "comparable_tray_count": len(rows),
+        "rows": rows,
+        "excluded_trays": excluded_trays,
+        "rescue_probability_semantics": (
+            "道具结果后仍可抽（达到全部质量线）的分支概率，不是中奖率。"
+        ),
+        "ranking_policy": {
+            "basis": "existing_strategy_metrics",
+            "status_order": [
+                "ready",
+                "tool_dependent",
+                "switch",
+                "needs_acceptance_rules",
+                "session_stop",
+            ],
+            "tool_dependent_primary": "p_qualifying_branch",
+            "prefer_fewer_cards_within_tolerance": True,
+            "note": (
+                "直接合格端沿用既有策略指标排序，只有超过既有道具提升门槛"
+                "才建议用卡，实用容差内等价时优先不用卡；依赖道具端先比"
+                "达线分支概率，再比策略主指标、风险、预期用卡数和稳定端 ID。"
+                "排序不创建新的隐含策略。"
+            ),
+        },
+        "future_tray_improvement_guaranteed": False,
+    }
+    if depth_two is not None:
+        comparison["depth_two"] = depth_two
+    return {
+        "report_type": "tray_comparison",
+        "series": model_state.get("series"),
+        "objective_mode": model_state["preferences"]["objective_mode"],
+        "strategy_name": model_state["preferences"]["strategy"],
+        "strategy_rule": STRATEGY_RULES[
+            model_state["preferences"]["objective_mode"]
+        ],
+        "session_summary": {
+            "session_schema_version": session["session_schema_version"],
+            "active_tray_id": session["active_tray_id"],
+            "accepted_tray_id": session["accepted_tray_id"],
+            "candidate_tray_id": candidate_tray_id,
+            "lock_status": lifecycle["phase"],
+            "tray_lifecycle": lifecycle,
+            "tray_ids": list(tray_states),
+            "tools": copy.deepcopy(session["tools"]),
+            "draws_used": session["draws_used"],
+            "max_draws": model_state["preferences"]["stop_rules"].get(
+                "max_draws"
+            ),
+            "event_count": len(session["events"]),
+        },
+        "comparison": comparison,
+        "recommendation": recommendation,
+        "stop_rules": copy.deepcopy(
+            model_state["preferences"]["stop_rules"]
+        ),
+        "model_summary": {
+            "type": model_state["model"].get("type", "unique_regular"),
+            "designs": list(model_state["_union_designs"]),
+            "independent_trays": (
+                "每端独立建模；不同端之间不建立概率相关性，已售未知盒"
+                "保留在各端全局约束中。"
+            ),
+            **model_contract,
+        },
+        "model_warnings": model_warnings,
+    }
+
+
+SESSION_REVIEW_STOP_CONCLUSIONS = frozenset(
+    {
+        "budget_exhausted",
+        "stopped_below_quality_lines",
+        "still_recommend_drawing",
+        "no_drawable_box_remains",
+    }
+)
+
+SESSION_REVIEW_STOP_CONCLUSION_LABELS = {
+    "budget_exhausted": "已达到整轮抽盒上限，停止",
+    "stopped_below_quality_lines": "质量线未达标，主动停止",
+    "still_recommend_drawing": "按当前质量线仍可继续抽",
+    "no_drawable_box_remains": "当前端已无可抽盒位",
+}
+
+REVIEW_UNRECOVERABLE_LEGACY = "legacy_state_without_event_ledger"
+
+SESSION_REVIEW_TOOL_LABELS = {"hint": "提示卡", "display": "显示卡"}
+
+SESSION_REVIEW_EVENT_LABELS = {
+    "tray_switch": "切端",
+    "tray_committed": "候选承诺",
+    "tray_accepted": "接受",
+    "tray_released": "释放",
+    "stop_rule_override": "停止线调整",
+}
+
+
+def _replay_baseline_trays(
+    session: Mapping[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    """Deep-copy tray states rewound to the pre-event session baseline.
+
+    The envelope stores final box states, so every recorded event is undone in
+    reverse order: hint events remove their exclusion, display events clear
+    the revealed design, and openings reopen the box. Validation guarantees
+    each tool/open box has a ledger event, so the rewind is exhaustive.
+    """
+    trays = copy.deepcopy(session["_tray_states"])
+    per_tray_events: Dict[str, List[Mapping[str, Any]]] = {
+        tray_id: [] for tray_id in trays
+    }
+    for event in session["events"]:
+        per_tray_events[event["tray_id"]].append(event)
+    for tray_id, tray_events in per_tray_events.items():
+        boxes = {box["id"]: box for box in trays[tray_id]["boxes"]}
+        for event in reversed(tray_events):
+            event_type = event["type"]
+            if event_type == "hint_used":
+                box = boxes[event["box_id"]]
+                if event["excluded"] in box["excluded"]:
+                    box["excluded"].remove(event["excluded"])
+                box["tool_used"] = False
+            elif event_type == "display_used":
+                box = boxes[event["box_id"]]
+                box["known"] = None
+                box["tool_used"] = False
+            elif event_type == "opened_result":
+                box = boxes[event["box_id"]]
+                box["status"] = AVAILABLE_STATUS
+                box["known"] = None
+    return trays
+
+
+def _replay_baseline_tools(session: Mapping[str, Any]) -> Dict[str, Any]:
+    """Remaining inventory plus consumed cards equals the session baseline."""
+    tools = copy.deepcopy(session["tools"])
+    for event in session["events"]:
+        if event["type"] == "hint_used":
+            tools["hint_cards"] = int(tools.get("hint_cards", 0)) + 1
+        elif event["type"] == "display_used":
+            tools["display_cards"] = int(tools.get("display_cards", 0)) + 1
+    return tools
+
+
+def _replay_stop_rules(session: Mapping[str, Any]) -> Dict[str, Any]:
+    """Final stop rules rewound through every override's recorded old value."""
+    stop_rules = copy.deepcopy(
+        session["_tray_states"][session["active_tray_id"]]["preferences"][
+            "stop_rules"
+        ]
+    )
+    for event in reversed(session["events"]):
+        if event["type"] == "stop_rule_override":
+            if event["old_value"] is None:
+                stop_rules.pop(event["rule"], None)
+            else:
+                stop_rules[event["rule"]] = event["old_value"]
+    return stop_rules
+
+
+def _replay_context(
+    state: MutableMapping[str, Any],
+    stop_rules: Mapping[str, Any],
+    tools: Mapping[str, Any],
+    draws_used: int,
+) -> None:
+    state["preferences"]["stop_rules"] = copy.deepcopy(
+        dict(stop_rules)
+    )
+    state["tools"] = copy.deepcopy(dict(tools))
+    state["_session_draws_used"] = int(draws_used)
+
+
+def _derived_acceptance_points(
+    session: Mapping[str, Any],
+) -> List[Dict[str, Any]]:
+    """Find real action points that first make a candidate fully qualify.
+
+    Explicit acceptance within the same commitment segment wins and suppresses
+    a derived duplicate. Otherwise the caller inserts one tray_accepted event
+    immediately after the qualifying action, including before a later release.
+    """
+    if session.get("_legacy_input") or not session.get("events"):
+        return []
+    trays = _replay_baseline_trays(session)
+    tools = _replay_baseline_tools(session)
+    stop_rules = _replay_stop_rules(session)
+    draws_used = 0
+    candidate_tray_id: Optional[str] = None
+    accepted_tray_id: Optional[str] = None
+    pending: Optional[Dict[str, Any]] = None
+    points: List[Dict[str, Any]] = []
+    tray_count = len(trays)
+
+    for event in session["events"]:
+        event_type = event["type"]
+        tray_id = event["tray_id"]
+        if event_type == "tray_committed":
+            candidate_tray_id = tray_id
+            accepted_tray_id = None
+            pending = None
+            continue
+        if event_type == "tray_accepted":
+            if pending is not None and pending["tray_id"] == tray_id:
+                pending = None
+            candidate_tray_id = None
+            accepted_tray_id = tray_id
+            continue
+        if event_type == "tray_released":
+            if pending is not None:
+                points.append(pending)
+                pending = None
+            if candidate_tray_id == tray_id:
+                candidate_tray_id = None
+            if accepted_tray_id == tray_id:
+                accepted_tray_id = None
+            continue
+        if event_type == "stop_rule_override":
+            if event["new_value"] is None:
+                stop_rules.pop(event["rule"], None)
+            else:
+                stop_rules[event["rule"]] = event["new_value"]
+            continue
+        if event_type not in {"hint_used", "display_used", "opened_result"}:
+            continue
+
+        if candidate_tray_id is None and accepted_tray_id is None:
+            if tray_count != 1:
+                continue
+            candidate_tray_id = tray_id
+
+        state = trays[tray_id]
+        boxes = {box["id"]: box for box in state["boxes"]}
+        box = boxes[event["box_id"]]
+        _replay_context(state, stop_rules, tools, draws_used)
+        if event_type == "hint_used":
+            box["excluded"].append(event["excluded"])
+            box["tool_used"] = True
+            tools["hint_cards"] = max(
+                0,
+                int(tools.get("hint_cards", 0)) - 1,
+            )
+        elif event_type == "display_used":
+            box["known"] = event["design"]
+            box["tool_used"] = True
+            tools["display_cards"] = max(
+                0,
+                int(tools.get("display_cards", 0)) - 1,
+            )
+        else:
+            box["status"] = "opened"
+            box["known"] = event["design"]
+            draws_used += 1
+        _replay_context(state, stop_rules, tools, draws_used)
+
+        if (
+            candidate_tray_id == tray_id
+            and accepted_tray_id is None
+            and pending is None
+            and _replay_tray_qualified(state)
+        ):
+            pending = {
+                "trigger_seq": int(event["seq"]),
+                "tray_id": tray_id,
+            }
+            accepted_tray_id = tray_id
+            candidate_tray_id = None
+
+    if pending is not None:
+        points.append(pending)
+    return points
+
+
+def _review_outcome_class_probabilities(
+    box_probs: Mapping[str, float],
+    preferences: Mapping[str, Any],
+) -> Dict[str, float]:
+    return _pure_review_outcome_classes(box_probs, preferences)
+
+
+def _review_failure_probability(
+    box_probs: Mapping[str, float],
+    preferences: Mapping[str, Any],
+    class_probabilities: Mapping[str, float],
+) -> Tuple[float, str]:
+    return _pure_review_failure_probability(
+        box_probs,
+        preferences,
+        class_probabilities,
+    )
+
+
+def _review_primary_metric_change(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+    state: Mapping[str, Any],
+) -> Dict[str, Any]:
+    try:
+        return _pure_review_primary_metric_change(before, after, state)
+    except ReviewMetricError as exc:
+        raise StateError(str(exc)) from exc
+
+
+def _review_quality_lines(
+    checks: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    return _pure_review_quality_lines(checks)
+
+
+def _review_strongest_alternative(
+    rows: Sequence[Mapping[str, Any]], chosen_index: int
+) -> Optional[Dict[str, Any]]:
+    return _pure_review_strongest_alternative(rows, chosen_index)
+
+
+def _review_snapshot_plan(
+    state: Mapping[str, Any],
+) -> Dict[str, Any]:
+    posterior = analyze_posterior(state)
+    return plan_tools(state, posterior, depth=1, beam_width=0)
+
+
+def _replay_tray_qualified(state: Mapping[str, Any]) -> bool:
+    """Mirror the #19 derived upgrade check at one replayed time point."""
+    try:
+        rows = available_box_metrics(state, analyze_posterior(state))
+    except StateError:
+        return False
+    if not rows:
+        return False
+    best = rows[0]
+    profile = _tray_acceptance_profile(state, best)
+    decision = evaluate_draw_decision(state, best)
+    return (
+        bool(profile)
+        and bool(decision["should_draw"])
+        and all(check["passed"] for check in profile)
+    )
+
+
+def _review_stop_conclusion(
+    session: Mapping[str, Any],
+) -> Tuple[str, str]:
+    state = session["_tray_states"][session["active_tray_id"]]
+    drawable = [
+        box for box in state["boxes"] if box["status"] in DRAWABLE_STATUSES
+    ]
+    draws_used = int(session["draws_used"])
+    max_draws = state["preferences"]["stop_rules"].get("max_draws")
+    if not drawable:
+        return (
+            "no_drawable_box_remains",
+            SESSION_REVIEW_STOP_CONCLUSION_LABELS[
+                "no_drawable_box_remains"
+            ],
+        )
+    if max_draws is not None and draws_used >= int(max_draws):
+        return (
+            "budget_exhausted",
+            SESSION_REVIEW_STOP_CONCLUSION_LABELS["budget_exhausted"],
+        )
+    posterior = analyze_posterior(state)
+    best = _terminal_best(state, posterior)
+    decision = evaluate_draw_decision(state, best)
+    if decision["should_draw"]:
+        return (
+            "still_recommend_drawing",
+            SESSION_REVIEW_STOP_CONCLUSION_LABELS[
+                "still_recommend_drawing"
+            ],
+        )
+    return (
+        "stopped_below_quality_lines",
+        SESSION_REVIEW_STOP_CONCLUSION_LABELS[
+            "stopped_below_quality_lines"
+        ],
+    )
+
+
+def _replay_session(session: Mapping[str, Any]) -> Dict[str, Any]:
+    """Deterministically replay the ledger into per-event review records."""
+    trays = _replay_baseline_trays(session)
+    tools = _replay_baseline_tools(session)
+    stop_rules = _replay_stop_rules(session)
+    draws_used = 0
+    openings: List[Dict[str, Any]] = []
+    tool_cards: List[Dict[str, Any]] = []
+    lifecycle: List[Dict[str, Any]] = []
+    candidate_lock: Optional[str] = None
+    accepted_lock: Optional[str] = None
+
+    for event in session["events"]:
+        event_type = event["type"]
+        tray_id = event["tray_id"]
+        if event_type in {
+            "tray_switch",
+            "tray_committed",
+            "tray_accepted",
+            "tray_released",
+            "stop_rule_override",
+        }:
+            entry: Dict[str, Any] = {
+                "seq": event["seq"],
+                "type": event_type,
+                "tray_id": tray_id,
+            }
+            if "reason" in event:
+                entry["reason"] = event["reason"]
+            if event_type == "stop_rule_override":
+                entry.update(
+                    {
+                        "rule": event["rule"],
+                        "old_value": event["old_value"],
+                        "new_value": event["new_value"],
+                    }
+                )
+                if event["new_value"] is None:
+                    stop_rules.pop(event["rule"], None)
+                else:
+                    stop_rules[event["rule"]] = event["new_value"]
+            elif event_type == "tray_committed":
+                entry["source"] = event.get("source", "explicit_event")
+                if "trigger_seq" in event:
+                    entry["trigger_seq"] = event["trigger_seq"]
+                if "trigger" in event:
+                    entry["trigger"] = event["trigger"]
+                candidate_lock = tray_id
+            elif event_type == "tray_accepted":
+                entry["source"] = event.get("source", "explicit_event")
+                if "trigger_seq" in event:
+                    entry["trigger_seq"] = event["trigger_seq"]
+                accepted_lock = tray_id
+                candidate_lock = None
+            elif event_type == "tray_released":
+                if accepted_lock == tray_id:
+                    accepted_lock = None
+                else:
+                    candidate_lock = None
+            lifecycle.append(entry)
+            continue
+
+        state = trays[tray_id]
+        boxes = {box["id"]: box for box in state["boxes"]}
+        box = boxes[event["box_id"]]
+        _replay_context(state, stop_rules, tools, draws_used)
+        if tray_id not in {accepted_lock, candidate_lock}:
+            # The ledger validator already guaranteed no other lock can be
+            # held here, so this is the single-tray auto commitment.
+            candidate_lock = tray_id
+            lifecycle.append(
+                {
+                    "seq": event["seq"],
+                    "type": "tray_committed",
+                    "tray_id": tray_id,
+                    "source": "first_tool_or_open",
+                    "trigger": event_type,
+                    "reason": "首次真实用卡或开盒自动记录候选承诺",
+                }
+            )
+
+        if event_type == "opened_result":
+            posterior = analyze_posterior(state)
+            rows = available_box_metrics(state, posterior)
+            box_probs = posterior.marginals[event["box_id"]]
+            design = event["design"]
+            p_actual = float(box_probs.get(design, 0.0))
+            possible = sorted(
+                (d for d, p in box_probs.items() if p > 0),
+                key=lambda d: (-float(box_probs[d]), d),
+            )
+            rank = (
+                possible.index(design) + 1 if p_actual > 0 else None
+            )
+            chosen_row = next(
+                row for row in rows if row["box_id"] == event["box_id"]
+            )
+            chosen_index = rows.index(chosen_row)
+            preferences = state["preferences"]
+            disliked_set = set(preferences["disliked"]) | set(
+                preferences["hard_avoid"]
+            )
+            class_probabilities = _review_outcome_class_probabilities(
+                box_probs, preferences
+            )
+            failure_probability, failure_semantics = (
+                _review_failure_probability(
+                    box_probs,
+                    preferences,
+                    class_probabilities,
+                )
+            )
+            checks = _tray_acceptance_profile(state, chosen_row)
+            decision = evaluate_draw_decision(state, chosen_row)
+            openings.append(
+                {
+                    "seq": event["seq"],
+                    "tray_id": tray_id,
+                    "box_id": event["box_id"],
+                    "design": design,
+                    "recoverable": True,
+                    "actual_design_prior_pp": 100.0 * p_actual,
+                    "actual_design_rank": rank,
+                    "possible_designs_ranked": [
+                        {
+                            "design": candidate,
+                            "probability_pp": 100.0
+                            * float(box_probs[candidate]),
+                        }
+                        for candidate in possible
+                    ],
+                    "outcome_class_probabilities_pp": {
+                        key: 100.0 * value
+                        for key, value in class_probabilities.items()
+                    },
+                    "accepted_failure_pp": 100.0 * failure_probability,
+                    "failure_semantics": failure_semantics,
+                    "quality_lines_at_draw": _review_quality_lines(checks),
+                    "should_draw_at_decision": bool(decision["should_draw"]),
+                    "stop_reasons_at_decision": list(
+                        decision["reasons"]
+                    ),
+                    "chosen_was_optimal": chosen_index == 0,
+                    "strongest_alternative": _review_strongest_alternative(
+                        rows, chosen_index
+                    ),
+                    "liked_hit": design in set(preferences["liked"]),
+                    "hard_avoid_hit": design
+                    in set(preferences["hard_avoid"]),
+                    "disliked_hit": design in disliked_set,
+                }
+            )
+            box["status"] = "opened"
+            box["known"] = design
+            draws_used += 1
+            _replay_context(state, stop_rules, tools, draws_used)
+            continue
+
+        # hint_used / display_used: snapshot before applying the card.
+        tool = "hint" if event_type == "hint_used" else "display"
+        before_plan = _review_snapshot_plan(state)
+        before_best = before_plan["baseline_best_draw"]
+        before_draw_decision = evaluate_draw_decision(state, before_best)
+        matching_action = next(
+            (
+                action
+                for action in before_plan["action_ranking"]
+                if action["tool"] == tool
+                and action["box_id"] == event["box_id"]
+            ),
+            None,
+        )
+        if tool == "hint":
+            box["excluded"].append(event["excluded"])
+            tools["hint_cards"] = max(0, int(tools.get("hint_cards", 0)) - 1)
+            real_result: Dict[str, Any] = {"excluded": event["excluded"]}
+        else:
+            box["known"] = event["design"]
+            tools["display_cards"] = max(
+                0, int(tools.get("display_cards", 0)) - 1
+            )
+            real_result = {"revealed": event["design"]}
+        box["tool_used"] = True
+
+        after_state = trays[tray_id]
+        _replay_context(after_state, stop_rules, tools, draws_used)
+        after_plan = _review_snapshot_plan(after_state)
+        after_best = after_plan["baseline_best_draw"]
+        after_draw_decision = evaluate_draw_decision(after_state, after_best)
+        primary_metric_change = _review_primary_metric_change(
+            before_best,
+            after_best,
+            after_state,
+        )
+        before_action_identity = (
+            bool(before_draw_decision["should_draw"]),
+            before_best["box_id"]
+            if before_draw_decision["should_draw"]
+            else None,
+        )
+        after_action_identity = (
+            bool(after_draw_decision["should_draw"]),
+            after_best["box_id"]
+            if after_draw_decision["should_draw"]
+            else None,
+        )
+        tool_cards.append(
+            {
+                "seq": event["seq"],
+                "tray_id": tray_id,
+                "box_id": event["box_id"],
+                "tool": tool,
+                "recoverable": True,
+                "real_result": real_result,
+                "ex_ante_drawable_branch_pp": (
+                    100.0
+                    * float(matching_action["expected_draw_probability"])
+                    if matching_action is not None
+                    else None
+                ),
+                "ex_ante_branch_available": matching_action is not None,
+                "best_box_before": before_best["box_id"],
+                "best_box_after": after_best["box_id"],
+                "best_p_like_before_pp": 100.0
+                * float(before_best["p_like_any"]),
+                "best_p_like_after_pp": 100.0
+                * float(after_best["p_like_any"]),
+                "primary_metric_change": primary_metric_change,
+                "primary_metric_change_pp": (
+                    primary_metric_change["delta"]
+                    if primary_metric_change["unit"] == "percentage_points"
+                    else None
+                ),
+                "ranking_changed": (
+                    before_best["box_id"] != after_best["box_id"]
+                ),
+                "decision_changed": (
+                    before_action_identity != after_action_identity
+                ),
+                "action_before": (
+                    "draw" if before_draw_decision["should_draw"] else "stop"
+                ),
+                "action_after": (
+                    "draw" if after_draw_decision["should_draw"] else "stop"
+                ),
+                "cards_remaining_after": int(
+                    tools.get(
+                        "hint_cards"
+                        if tool == "hint"
+                        else "display_cards",
+                        0,
+                    )
+                ),
+            }
+        )
+
+    return {
+        "recoverable": True,
+        "unrecoverable_reason": None,
+        "unrecoverable_items": [],
+        "baseline": {
+            "draws_used": 0,
+            "tools": _replay_baseline_tools(session),
+        },
+        "openings": openings,
+        "tool_cards": tool_cards,
+        "lifecycle": lifecycle,
+    }
+
+
+def _legacy_session_review_replay(
+    session: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Legacy single-tray states carry no ledger: mark, never fabricate."""
+    state = session["_tray_states"][session["active_tray_id"]]
+    opened_boxes = sum(
+        1 for box in state["boxes"] if box["status"] == "opened"
+    )
+    tool_boxes = sum(1 for box in state["boxes"] if box["tool_used"])
+    items = [
+        {
+            "field": "openings",
+            "reason": REVIEW_UNRECOVERABLE_LEGACY,
+        },
+        {
+            "field": "tool_cards",
+            "reason": REVIEW_UNRECOVERABLE_LEGACY,
+        },
+        {
+            "field": "quality_lines_at_draw",
+            "reason": REVIEW_UNRECOVERABLE_LEGACY,
+        },
+        {
+            "field": "stop_rule_overrides",
+            "reason": REVIEW_UNRECOVERABLE_LEGACY,
+        },
+    ]
+    return {
+        "recoverable": False,
+        "unrecoverable_reason": REVIEW_UNRECOVERABLE_LEGACY,
+        "unrecoverable_items": items,
+        "baseline": {
+            "draws_used": None,
+            "tools": None,
+            "opened_boxes_total": opened_boxes,
+            "tool_boxes_total": tool_boxes,
+        },
+        "openings": [],
+        "tool_cards": [],
+        "lifecycle": [],
+    }
+
+
+def _review_bias_checks(
+    openings: Sequence[Mapping[str, Any]],
+    overrides: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    def chosen_p_like(opening: Mapping[str, Any]) -> float:
+        return round(
+            float(
+                opening["outcome_class_probabilities_pp"]["liked"]
+            ),
+            6,
+        )
+
+    def flush_chain(chain: List[Mapping[str, Any]]) -> None:
+        if len(chain) < 2:
+            return
+        miss_chains.append(
+            {
+                "seqs": [opening["seq"] for opening in chain],
+                "chosen_p_like_pp": [
+                    chosen_p_like(opening) for opening in chain
+                ],
+            }
+        )
+
+    despite_failing = [
+        opening["seq"]
+        for opening in openings
+        if opening["quality_lines_at_draw"]
+        and not all(
+            check["passed"] for check in opening["quality_lines_at_draw"]
+        )
+    ]
+    miss_chains: List[Dict[str, Any]] = []
+    current_chain: List[Mapping[str, Any]] = []
+    for opening in openings:
+        if opening["liked_hit"]:
+            flush_chain(current_chain)
+            current_chain = []
+        else:
+            current_chain.append(opening)
+    flush_chain(current_chain)
+    gambler_chains = [
+        chain
+        for chain in miss_chains
+        if all(
+            later <= earlier + 1e-9
+            for earlier, later in zip(
+                chain["chosen_p_like_pp"], chain["chosen_p_like_pp"][1:]
+            )
+        )
+    ]
+    return {
+        "sunk_cost_risk": bool(despite_failing),
+        "sunk_cost_evidence": {
+            "openings_despite_failing_lines": despite_failing,
+            "stop_rule_overrides_total": len(overrides),
+        },
+        "gambler_fallacy_risk": bool(gambler_chains),
+        "gambler_fallacy_evidence": {
+            "consecutive_miss_chains": miss_chains,
+            "non_increasing_chains": gambler_chains,
+        },
+        "semantics": (
+            "全部检查只使用决策时点的事前信息；连续未中且所抽盒喜欢概率"
+            "未上升仍继续抽，标记为可能的赌徒谬误；质量线未过仍开盒，"
+            "标记为可能的沉没成本。"
+        ),
+    }
+
+
+def build_session_review_report(
+    session: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Replay the event ledger into a validated whole-session review."""
+    if session.get("_briefing_input"):
+        raise StateError(
+            "a preference briefing has no trays to review; observe a real "
+            "tray first"
+        )
+    legacy = bool(session.get("_legacy_input"))
+    replay = (
+        _legacy_session_review_replay(session)
+        if legacy
+        else _replay_session(session)
+    )
+    openings = replay["openings"]
+    overrides = [
+        entry
+        for entry in replay["lifecycle"]
+        if entry["type"] == "stop_rule_override"
+    ]
+
+    active_state = session["_tray_states"][session["active_tray_id"]]
+    model_summary, model_warnings = _model_reporting_contract(
+        active_state,
+        hint_planning_active=bool(active_state["tools"].get("hint_cards")),
+    )
+    conclusion, conclusion_label = _review_stop_conclusion(session)
+
+    non_optimal = [
+        opening["seq"] for opening in openings if not opening["chosen_was_optimal"]
+    ]
+    zero_probability = [
+        opening["seq"]
+        for opening in openings
+        if opening["actual_design_rank"] is None
+    ]
+    outcome_counts = {
+        "liked_hits": sum(1 for opening in openings if opening["liked_hit"]),
+        "disliked_hits": sum(
+            1 for opening in openings if opening["disliked_hit"]
+        ),
+        "hard_avoid_hits": sum(
+            1 for opening in openings if opening["hard_avoid_hit"]
+        ),
+        "neutral_results": sum(
+            1
+            for opening in openings
+            if not opening["liked_hit"] and not opening["disliked_hit"]
+        ),
+        "openings_total": len(openings),
+    }
+
+    return {
+        "report_type": "session_review",
+        # Session-schema states keep the series on every tray state (it is a
+        # shared global), while legacy states keep it at the top level.
+        "series": session.get("series", active_state.get("series")),
+        "session_summary": {
+            "tray_ids": sorted(session["_tray_states"]),
+            "active_tray_id": session["active_tray_id"],
+            "accepted_tray_id": session.get("accepted_tray_id"),
+            "candidate_tray_id": session.get("candidate_tray_id"),
+            "remaining_tools": copy.deepcopy(session["tools"]),
+            "draws_used": int(session["draws_used"]),
+            "event_count": len(session["events"]),
+        },
+        "replay": replay,
+        "stop_rule_overrides": [
+            copy.deepcopy(entry) for entry in overrides
+        ],
+        "global_counters": {
+            "remaining_tools": copy.deepcopy(session["tools"]),
+            "draws_used": int(session["draws_used"]),
+            "max_draws": active_state["preferences"]["stop_rules"].get(
+                "max_draws"
+            ),
+            "opened_boxes": int(session["draws_used"]),
+            "final_stop_conclusion": conclusion,
+            "final_stop_conclusion_label": conclusion_label,
+        },
+        "decision_quality": {
+            "all_openings_optimal": not non_optimal,
+            "non_optimal_openings": non_optimal,
+            "openings_despite_failing_lines": [
+                opening["seq"]
+                for opening in openings
+                if opening["quality_lines_at_draw"]
+                and not all(
+                    check["passed"]
+                    for check in opening["quality_lines_at_draw"]
+                )
+            ],
+            "semantics": (
+                "只与决策时点的最强备选比较，不使用开盒后信息倒推。"
+            ),
+        },
+        "outcome_quality": outcome_counts,
+        "model_quality": {
+            "zero_probability_openings": zero_probability,
+            "model_scope": model_summary,
+            "model_warnings": model_warnings,
+        },
+        "bias_checks": _review_bias_checks(openings, overrides),
+    }
+
+
+def validate_tray_comparison_report(report: Mapping[str, Any]) -> None:
+    errors: List[str] = []
+    if report.get("report_type") != "tray_comparison":
+        errors.append("report_type must be 'tray_comparison'")
+    comparison = report.get("comparison")
+    if not isinstance(comparison, Mapping):
+        raise StateError(
+            "tray comparison validation failed: missing comparison section"
+        )
+    rows = comparison.get("rows")
+    excluded = comparison.get("excluded_trays")
+    if not isinstance(rows, list) or not isinstance(excluded, list):
+        raise StateError(
+            "tray comparison validation failed: rows and excluded_trays "
+            "must be lists"
+        )
+    depth = comparison.get("planning_depth")
+    if depth not in {1, 2}:
+        errors.append("planning_depth must be 1 or 2")
+
+    session_summary = report.get("session_summary")
+    if not isinstance(session_summary, Mapping):
+        raise StateError(
+            "tray comparison validation failed: missing session_summary"
+        )
+    tray_ids = list(session_summary.get("tray_ids", []))
+    row_ids = [row.get("tray_id") for row in rows]
+    excluded_ids = [item.get("tray_id") for item in excluded]
+    if sorted(row_ids + excluded_ids) != sorted(tray_ids):
+        errors.append(
+            "every session tray must appear exactly once in either rows or "
+            "excluded_trays"
+        )
+    if len(set(row_ids)) != len(row_ids):
+        errors.append("ranked rows contain duplicate tray ids")
+    if [row.get("rank") for row in rows] != list(range(1, len(rows) + 1)):
+        errors.append("row ranks must be contiguous starting from 1")
+
+    lifecycle = session_summary.get("tray_lifecycle")
+    if not isinstance(lifecycle, Mapping):
+        errors.append("session tray lifecycle is missing")
+    else:
+        errors.extend(_lifecycle_block_errors(lifecycle))
+        if session_summary.get("lock_status") != lifecycle.get("phase"):
+            errors.append("session lock status contradicts the lifecycle")
+        if session_summary.get("candidate_tray_id") != lifecycle.get(
+            "candidate_tray_id"
+        ):
+            errors.append("session candidate contradicts the lifecycle")
+        phase = lifecycle.get("phase")
+        if phase in {"candidate", "accepted"}:
+            locked_id = lifecycle.get("accepted_tray_id")
+            if locked_id is None:
+                locked_id = lifecycle.get("candidate_tray_id")
+            if locked_id not in tray_ids:
+                errors.append(
+                    "the committed tray must be a session tray"
+                )
+            if locked_id != session_summary.get("active_tray_id"):
+                errors.append(
+                    "the committed tray must remain the active tray"
+                )
+
+    status_sequence = []
+    strategy_ranking_keys: List[Any] = []
+    for row in rows:
+        status = row.get("status")
+        if status not in TRAY_COMPARISON_STATUS_RANK:
+            errors.append(f"row {row.get('tray_id')!r}: unknown status")
+            continue
+        status_sequence.append(TRAY_COMPARISON_STATUS_RANK[status])
+        try:
+            strategy_ranking_keys.append(
+                _comparison_key_from_json(row.get("strategy_ranking_key"))
+            )
+        except (TypeError, ValueError):
+            errors.append(
+                f"row {row.get('tray_id')!r}: strategy ranking key is malformed"
+            )
+        if row.get("status_label") != TRAY_COMPARISON_STATUS_LABELS.get(
+            status
+        ):
+            errors.append(
+                f"row {row.get('tray_id')!r}: status_label mismatch"
+            )
+        metrics = row.get("metrics")
+        if not isinstance(metrics, Mapping):
+            errors.append(f"row {row.get('tray_id')!r}: missing metrics")
+            continue
+        for key in (
+            "p_like_any_pp",
+            "p_favorite_any_pp",
+            "p_dislike_any_pp",
+            "p_hard_avoid_pp",
+        ):
+            value = metrics.get(key)
+            if value is None or not 0.0 <= float(value) <= 100.0:
+                errors.append(
+                    f"row {row.get('tray_id')!r}: {key} must be within [0, 100]"
+                )
+        rescue = row.get("post_tool_draw_probability_pp")
+        if rescue is None or not 0.0 <= float(rescue) <= 100.0:
+            errors.append(
+                f"row {row.get('tray_id')!r}: post_tool_draw_probability_pp "
+                "must be within [0, 100]"
+            )
+        action = row.get("first_tool_action")
+        if not isinstance(action, Mapping) or action.get("tool") not in {
+            "none",
+            "hint",
+            "display",
+        }:
+            errors.append(
+                f"row {row.get('tray_id')!r}: first_tool_action is malformed"
+            )
+        elif status == "tool_dependent" and (
+            action["tool"] == "none" or float(rescue) <= 0.0
+        ):
+            errors.append(
+                f"row {row.get('tray_id')!r}: tool_dependent trays need a "
+                "card action with a positive qualifying-branch probability"
+            )
+    if status_sequence != sorted(status_sequence):
+        errors.append(
+            "rows must keep the status order ready < tool_dependent < switch "
+            "< needs_acceptance_rules < session_stop"
+        )
+    if (
+        len(strategy_ranking_keys) == len(rows)
+        and strategy_ranking_keys != sorted(strategy_ranking_keys)
+    ):
+        errors.append("rows violate the existing strategy ranking")
+    tool_dependent_rows = [
+        row for row in rows if row.get("status") == "tool_dependent"
+    ]
+    rescues = [
+        float(row["post_tool_draw_probability_pp"])
+        for row in tool_dependent_rows
+    ]
+    if rescues != sorted(rescues, reverse=True):
+        errors.append(
+            "tool_dependent rows must not gain rank with a lower "
+            "qualifying-branch probability"
+        )
+
+    for item in excluded:
+        if item.get("reason") not in TRAY_COMPARISON_EXCLUDED_REASONS:
+            errors.append(
+                f"excluded tray {item.get('tray_id')!r}: unknown reason"
+            )
+
+    recommendation = report.get("recommendation")
+    if not isinstance(recommendation, Mapping):
+        raise StateError(
+            "tray comparison validation failed: missing recommendation"
+        )
+    if rows:
+        if recommendation.get("recommended_tray_id") != rows[0]["tray_id"]:
+            errors.append(
+                "the recommended tray must be the top-ranked operable tray"
+            )
+    elif recommendation.get("recommended_tray_id") is not None:
+        errors.append(
+            "a session without operable trays cannot recommend a tray"
+        )
+    if (
+        comparison.get("future_tray_improvement_guaranteed") is not False
+        or recommendation.get("future_tray_improvement_guaranteed") is not
+        False
+    ):
+        errors.append("future tray improvement must never be guaranteed")
+    semantics = comparison.get("rescue_probability_semantics", "")
+    if "不是中奖率" not in str(semantics):
+        errors.append(
+            "qualifying-branch probabilities must be labeled as not a "
+            "win rate"
+        )
+
+    if rows:
+        top = rows[0]
+        commitment = recommendation.get("commitment_after_action")
+        needs_commitment = (
+            top.get("status") == "tool_dependent"
+            and recommendation.get("action") == "execute_first_action"
+            and session_summary.get("accepted_tray_id") != top.get("tray_id")
+            and session_summary.get("candidate_tray_id") != top.get("tray_id")
+        )
+        if needs_commitment and not isinstance(commitment, Mapping):
+            errors.append(
+                "a tool-dependent recommendation must state the candidate "
+                "commitment step"
+            )
+        if isinstance(commitment, Mapping) and (
+            not needs_commitment
+            or commitment.get("phase") != "candidate"
+            or commitment.get("record_event") != "tray_committed"
+        ):
+            errors.append(
+                "commitment_after_action is malformed or premature"
+            )
+
+    if depth == 2:
+        depth_two = comparison.get("depth_two")
+        if not isinstance(depth_two, Mapping):
+            errors.append("depth-two comparison requires its horizon section")
+        else:
+            head_ids = depth_two.get("head_candidate_tray_ids", [])
+            row_id_set = set(row_ids)
+            if not head_ids or not set(head_ids) <= row_id_set:
+                errors.append(
+                    "depth-two head candidates must be ranked operable trays"
+                )
+            if depth_two.get("cards_available", 0) < 2:
+                errors.append(
+                    "depth-two comparison requires at least two cards"
+                )
+            for row in rows:
+                if row["tray_id"] in set(head_ids):
+                    detail = row.get("depth_two_detail")
+                    if not isinstance(detail, Mapping) or not isinstance(
+                        detail.get("first_action_changed_vs_depth_1"), bool
+                    ):
+                        errors.append(
+                            f"row {row['tray_id']!r}: missing depth-two detail"
+                        )
+                elif "depth_two_note" not in row:
+                    errors.append(
+                        f"row {row['tray_id']!r}: missing depth-two note"
+                    )
+
+    if errors:
+        raise StateError(
+            "tray comparison validation failed: " + "; ".join(errors)
+        )
 
 
 REPORT_RULE_LABELS = {
@@ -3197,6 +5113,286 @@ def validate_preference_calibration_report(
         )
 
 
+def _preference_tier_conflicts(
+    state: Mapping[str, Any],
+) -> List[Dict[str, Any]]:
+    try:
+        return _pure_preference_tier_conflicts(state)
+    except PreferencePolicyError as exc:
+        raise StateError(str(exc)) from exc
+
+
+def _briefing_reference_value(rule: str, baseline_pp: float) -> float:
+    return _pure_briefing_reference_value(rule, baseline_pp)
+
+
+def _briefing_reference_rules(
+    state: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+) -> List[Dict[str, Any]]:
+    return _pure_briefing_reference_rules(state, baseline)
+
+
+def build_preference_briefing_report(
+    state: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Build the zero-tray preference briefing without observing any tray."""
+    coverage = state["_score_coverage"]
+    if not coverage["complete"]:
+        if coverage.get("score_default_supplied") and not coverage[
+            "score_default_confirmed"
+        ]:
+            raise StateError(
+                "preference briefing cannot fill omitted designs until "
+                "preferences.score_default_confirmed=true"
+            )
+        raise StateError(
+            "preference briefing requires complete scores for every regular "
+            f"design; missing {coverage['missing_scores']}"
+        )
+    posterior = analyze_posterior(state)
+    baseline_metrics = metrics_for_box(
+        state, posterior, state["boxes"][0]["id"]
+    )
+    baseline = {
+        "regular_count": len(state["_union_designs"]),
+        "distribution": "uniform_over_complete_no_duplicate_case",
+        "p_favorite_any_pp": 100.0 * baseline_metrics["p_favorite_any"],
+        "p_like_any_pp": 100.0 * baseline_metrics["p_like_any"],
+        "p_dislike_any_pp": 100.0 * baseline_metrics["p_dislike_any"],
+        "p_hard_avoid_pp": 100.0 * baseline_metrics["p_hard_avoid"],
+        "expected_score": baseline_metrics["expected_score"],
+        "resale_ev": baseline_metrics["resale_ev"],
+    }
+
+    preference_conflicts = _preference_tier_conflicts(state)
+    reference_rules = (
+        _briefing_reference_rules(state, baseline)
+        if (
+            state["preferences"]["objective_mode"] == "target_only"
+            and not preference_conflicts
+        )
+        else []
+    )
+    if preference_conflicts:
+        status = "preference_conflict"
+    elif reference_rules:
+        status = "needs_confirmation"
+    else:
+        status = "calibration_required"
+    return {
+        "report_type": "preference_briefing",
+        "series": state.get("series"),
+        "tray_id": None,
+        "status": status,
+        "strategy_name": state["preferences"]["strategy"],
+        "strategy_rule": STRATEGY_RULES[
+            state["preferences"]["objective_mode"]
+        ],
+        "blind_baseline": baseline,
+        "score_coverage": copy.deepcopy(state["_score_coverage"]),
+        "market_value_coverage": copy.deepcopy(
+            state["_market_value_coverage"]
+        ),
+        "scores": copy.deepcopy(state["preferences"]["scores"]),
+        "score_tiers": copy.deepcopy(state["preferences"]["score_tiers"]),
+        "preference_conflicts": preference_conflicts,
+        "reference_lines": {
+            "applies_to_strategies": ["随便中个喜欢"],
+            "applicable": bool(reference_rules),
+            "rules": reference_rules,
+            "rounding": (
+                "五个百分点一档；min 线严格上移、max 线严格下移；"
+                "弱基线使用 40% / 35% / 20% 平衡锚点"
+            ),
+            "redirect_other_strategies": (
+                "其他策略无端不生成参考线；进入具体端后运行 "
+                "--calibrate-preferences，用当前端真实可达取舍确认边界。"
+            ),
+        },
+        "existing_stop_rules": copy.deepcopy(
+            state["preferences"]["stop_rules"]
+        ),
+        "stop_rules_mutated": False,
+        "confirmation_required": True,
+        "model_summary": {
+            "scope": "regular_only",
+            "hidden_designs_included": False,
+            "probability_kind": "prior_baseline",
+            "conditional_on": [
+                "complete_no_duplicate_case",
+                "regular_only_scope",
+            ],
+            "probability_statement": (
+                "以下数值是常规款整盒无重复、尚未观察任何盒位时的盲抽先验"
+                "基线，不是当前端校准结果。"
+            ),
+        },
+        "model_warnings": [
+            {
+                "code": "regular_only_scope",
+                "severity": "warning",
+                "applies_to": "all_probabilities",
+                "message": (
+                    "当前仅建模常规款；隐藏款及替换规则未计入，所有百分比均为"
+                    "常规款范围下的条件概率。"
+                ),
+            },
+            {
+                "code": "current_tray_not_observed",
+                "severity": "warning",
+                "applies_to": "reference_lines",
+                "message": (
+                    "尚未观察任何一端盒位；参考线只与盲抽基线比较，不代表"
+                    "任何已观察端的真实水平。"
+                ),
+            },
+        ],
+    }
+
+
+def validate_preference_briefing_report(
+    report: Mapping[str, Any],
+) -> None:
+    errors: List[str] = []
+    if report.get("report_type") != "preference_briefing":
+        errors.append("report type")
+    if report.get("status") not in {
+        "needs_confirmation",
+        "calibration_required",
+        "preference_conflict",
+    }:
+        errors.append("status")
+    if report.get("stop_rules_mutated") is not False:
+        errors.append("stop rules were mutated")
+    if report.get("confirmation_required") is not True:
+        errors.append("confirmation gate")
+    coverage = report.get("score_coverage")
+    if not isinstance(coverage, Mapping) or coverage.get("complete") is not True:
+        errors.append("score coverage")
+    elif coverage.get("score_default_used") and not coverage.get(
+        "score_default_confirmed"
+    ):
+        errors.append("score default confirmation")
+    baseline = report.get("blind_baseline")
+    if not isinstance(baseline, Mapping):
+        errors.append("blind baseline")
+        baseline = {}
+    for key in (
+        "p_favorite_any_pp",
+        "p_like_any_pp",
+        "p_dislike_any_pp",
+        "p_hard_avoid_pp",
+    ):
+        value = baseline.get(key)
+        if not isinstance(value, (int, float)) or not 0.0 <= float(value) <= 100.0:
+            errors.append("baseline probability")
+    regular_count = baseline.get("regular_count")
+    if not isinstance(regular_count, int) or isinstance(regular_count, bool) or regular_count < 1:
+        errors.append("baseline regular count")
+    warnings = report.get("model_warnings")
+    if not isinstance(warnings, list) or not any(
+        isinstance(item, Mapping)
+        and item.get("code") == "current_tray_not_observed"
+        for item in warnings
+    ):
+        errors.append("current tray not observed warning")
+    reference = report.get("reference_lines")
+    if not isinstance(reference, Mapping):
+        errors.append("reference lines")
+        reference = {}
+    rules = reference.get("rules")
+    if not isinstance(rules, list):
+        errors.append("reference line list")
+        rules = []
+    if report.get("status") == "needs_confirmation" and not rules:
+        errors.append("reference line list")
+    if report.get("status") == "calibration_required" and rules:
+        errors.append("unexpected reference lines")
+    if report.get("status") == "preference_conflict" and rules:
+        errors.append("conflicted preferences cannot produce reference lines")
+    if rules and report.get("strategy_name") != "随便中个喜欢":
+        errors.append("reference line strategy scope")
+    seen_rules: set[str] = set()
+    for rule_entry in rules:
+        if not isinstance(rule_entry, Mapping):
+            errors.append("reference line shape")
+            continue
+        rule = str(rule_entry.get("rule", ""))
+        if rule not in BRIEFING_BASELINE_METRIC_BY_RULE or rule in seen_rules:
+            errors.append("reference line rule")
+        seen_rules.add(rule)
+        try:
+            baseline_pp = float(rule_entry.get("baseline_pp"))
+            suggested = float(rule_entry.get("suggested_value"))
+        except (TypeError, ValueError):
+            errors.append("reference line values")
+            continue
+        metric = BRIEFING_BASELINE_METRIC_BY_RULE.get(rule)
+        if metric is None or not _numbers_match(
+            baseline_pp, baseline.get(metric)
+        ):
+            errors.append("reference line baseline")
+            continue
+        if not 0.0 <= suggested <= 100.0:
+            errors.append("reference line value range")
+        expected = _briefing_reference_value(rule, baseline_pp)
+        if not _numbers_match(suggested, expected):
+            errors.append("reference line rounding")
+        if rule_entry.get("basis") != "blind_baseline_strictly_improved":
+            errors.append("reference line basis")
+        strictly_improved = (
+            suggested > baseline_pp + 1e-12
+            if rule.startswith("min_")
+            else suggested < baseline_pp - 1e-12
+        )
+        if not strictly_improved:
+            errors.append("reference line must strictly improve baseline")
+        if not _numbers_match(
+            rule_entry.get("delta_vs_baseline_pp"),
+            suggested - baseline_pp,
+        ):
+            errors.append("reference line delta")
+    conflicts = report.get("preference_conflicts")
+    if not isinstance(conflicts, list) or any(
+        not isinstance(item, Mapping)
+        or not item.get("design")
+        or (
+            item.get("explicit_field") not in {"liked", "disliked", "hard_avoid"}
+            and not str(item.get("explicit_field", "")).startswith(
+                "explicit_score_tiers."
+            )
+        )
+        or item.get("resolution") != "confirmation_required"
+        or item.get("current_effective_source") not in {
+            "explicit_field",
+            "scores",
+        }
+        for item in conflicts
+    ):
+        errors.append("preference conflicts")
+    if report.get("status") == "preference_conflict" and not conflicts:
+        errors.append("preference conflict status without conflicts")
+    if conflicts and report.get("status") != "preference_conflict":
+        errors.append("unresolved preference conflicts are not blocking")
+    forbidden_keys = {
+        "draw_decision",
+        "next_tool_plan",
+        "session_recommendation",
+        "tray_screening",
+        "ranking",
+        "top_3",
+    }
+    if forbidden_keys & set(report):
+        errors.append("formal recommendation leaked")
+
+    if errors:
+        raise StateError(
+            "preference briefing validation failed: "
+            + "; ".join(sorted(set(errors)))
+        )
+
+
 def _active_user_report(
     report: Mapping[str, Any],
 ) -> Tuple[Mapping[str, Any], Optional[str]]:
@@ -3243,6 +5439,329 @@ def _numbers_match(a: Any, b: Any, *, tolerance: float = 1e-12) -> bool:
         return False
 
 
+def _lifecycle_block_errors(
+    lifecycle: Mapping[str, Any],
+) -> List[str]:
+    """Structural checks for one commitment-ladder block."""
+    errors: List[str] = []
+    phase = lifecycle.get("phase")
+    if phase not in TRAY_LIFECYCLE_PHASES:
+        return ["tray lifecycle phase is invalid"]
+    if lifecycle.get("phase_label") != TRAY_LIFECYCLE_PHASE_LABELS[phase]:
+        errors.append("tray lifecycle phase label is inconsistent")
+    accepted_id = lifecycle.get("accepted_tray_id")
+    candidate_id = lifecycle.get("candidate_tray_id")
+    upgraded = bool(lifecycle.get("upgraded_from_candidate"))
+    source = lifecycle.get("commitment_source")
+    if phase == "open":
+        if accepted_id is not None or candidate_id is not None:
+            errors.append("an open lifecycle cannot name a committed tray")
+        if source is not None:
+            errors.append("an open lifecycle cannot name a commitment source")
+    elif phase == "candidate":
+        if candidate_id is None or accepted_id is not None:
+            errors.append(
+                "a candidate lifecycle must name exactly the candidate tray"
+            )
+        if upgraded:
+            errors.append("a candidate lifecycle cannot be marked upgraded")
+        if source not in TRAY_COMMITMENT_SOURCES:
+            errors.append("candidate commitment source is invalid")
+    else:
+        if upgraded:
+            if (candidate_id is None) == (accepted_id is None):
+                errors.append(
+                    "an upgraded acceptance must name exactly one locked tray"
+                )
+            if (
+                lifecycle.get("upgrade_basis")
+                != "real_clues_pass_all_quality_lines"
+            ):
+                errors.append("an upgraded acceptance must state its basis")
+            if lifecycle.get("accepted_via") != "quality_lines_upgrade":
+                errors.append("an upgraded acceptance must record its path")
+            if source not in TRAY_COMMITMENT_SOURCES:
+                errors.append("upgraded acceptance lost its commitment source")
+        else:
+            if accepted_id is None:
+                errors.append("an explicit acceptance must name the tray")
+            if lifecycle.get("accepted_via") != "explicit_event":
+                errors.append("an explicit acceptance must record its event")
+            if lifecycle.get("upgrade_basis") is not None:
+                errors.append("an explicit acceptance cannot claim an upgrade")
+            if source is not None:
+                errors.append("an explicit acceptance has no candidate source")
+    if lifecycle.get("release_required_before_switch") != (phase != "open"):
+        errors.append("lifecycle release requirement contradicts its phase")
+    return errors
+
+
+def validate_session_review_report(report: Mapping[str, Any]) -> None:
+    errors: List[str] = []
+    if not isinstance(report, Mapping):
+        raise StateError("session review report must be an object")
+    if report.get("report_type") != "session_review":
+        errors.append("report_type must be 'session_review'")
+
+    summary = report.get("session_summary")
+    if not isinstance(summary, Mapping):
+        errors.append("session summary is missing")
+    else:
+        for key in (
+            "tray_ids",
+            "active_tray_id",
+            "accepted_tray_id",
+            "candidate_tray_id",
+            "remaining_tools",
+            "draws_used",
+            "event_count",
+        ):
+            if key not in summary:
+                errors.append(f"session summary lacks {key}")
+
+    replay = report.get("replay")
+    if not isinstance(replay, Mapping):
+        errors.append("replay section is missing")
+        replay = {}
+    recoverable = replay.get("recoverable")
+    openings = replay.get("openings", [])
+    tool_cards = replay.get("tool_cards", [])
+    lifecycle = replay.get("lifecycle", [])
+    if recoverable is not True and recoverable is not False:
+        errors.append("replay recoverability must be a boolean")
+    if recoverable:
+        baseline = replay.get("baseline")
+        if not isinstance(baseline, Mapping) or not isinstance(
+            baseline.get("tools"), Mapping
+        ):
+            errors.append("a recoverable replay needs its baseline inventory")
+    else:
+        if not replay.get("unrecoverable_reason"):
+            errors.append("an unrecoverable replay must state its reason")
+        if not replay.get("unrecoverable_items"):
+            errors.append("an unrecoverable replay must list its blind spots")
+        if openings or tool_cards:
+            errors.append(
+                "an unrecoverable replay must not fabricate per-event numbers"
+            )
+
+    for opening in openings:
+        seq = opening.get("seq")
+        label = f"opening {seq}"
+        probabilities = opening.get("outcome_class_probabilities_pp", {})
+        for key in ("liked", "neutral", "disliked", "hard_avoid"):
+            value = probabilities.get(key)
+            if value is None or not 0.0 <= float(value) <= 100.0:
+                errors.append(f"{label}: outcome class {key} is out of range")
+        total = sum(
+            float(probabilities[key])
+            for key in ("liked", "neutral", "disliked")
+            if probabilities.get(key) is not None
+        )
+        if abs(total - 100.0) > 1e-6:
+            errors.append(f"{label}: outcome classes must partition to 100%")
+        prior = opening.get("actual_design_prior_pp")
+        if prior is None or not 0.0 <= float(prior) <= 100.0:
+            errors.append(f"{label}: actual design prior is out of range")
+        ranked = opening.get("possible_designs_ranked", [])
+        rank = opening.get("actual_design_rank")
+        if rank is None:
+            errors.append(f"{label}: actual design rank is missing")
+        elif not 1 <= int(rank) <= len(ranked):
+            errors.append(f"{label}: actual design rank exceeds support")
+        else:
+            ranked_probabilities = [
+                item["probability_pp"] for item in ranked
+            ]
+            if ranked_probabilities != sorted(
+                ranked_probabilities, reverse=True
+            ):
+                errors.append(f"{label}: possible designs are not ranked")
+            if not math.isclose(
+                float(ranked[int(rank) - 1]["probability_pp"]),
+                float(prior),
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            ):
+                errors.append(f"{label}: rank and prior disagree")
+            if ranked[int(rank) - 1]["design"] != opening.get("design"):
+                errors.append(f"{label}: rank points at another design")
+        failure = opening.get("accepted_failure_pp")
+        if failure is None or not 0.0 <= float(failure) <= 100.0:
+            errors.append(f"{label}: accepted failure probability is invalid")
+        if opening.get("strongest_alternative") is None and not opening.get(
+            "chosen_was_optimal"
+        ):
+            errors.append(f"{label}: a non-optimal choice needs its alternative")
+        for check in opening.get("quality_lines_at_draw", []):
+            if check.get("rule") not in STOP_RULE_KEYS:
+                errors.append(f"{label}: unknown quality line {check.get('rule')}")
+            if check.get("passed") not in (True, False):
+                errors.append(f"{label}: quality line pass state is missing")
+
+    for card in tool_cards:
+        seq = card.get("seq")
+        label = f"tool card {seq}"
+        if card.get("tool") not in {"hint", "display"}:
+            errors.append(f"{label}: unknown tool")
+        branch = card.get("ex_ante_drawable_branch_pp")
+        if card.get("ex_ante_branch_available"):
+            if branch is None or not 0.0 <= float(branch) <= 100.0:
+                errors.append(f"{label}: branch probability is out of range")
+        elif branch is not None:
+            errors.append(f"{label}: unavailable branch must stay null")
+        for key in ("best_p_like_before_pp", "best_p_like_after_pp"):
+            value = card.get(key)
+            if value is None or not 0.0 <= float(value) <= 100.0:
+                errors.append(f"{label}: {key} is out of range")
+        primary = card.get("primary_metric_change")
+        if not isinstance(primary, Mapping):
+            errors.append(f"{label}: primary metric change is missing")
+        else:
+            if primary.get("direction") not in {
+                "higher_is_better",
+                "lower_is_better",
+            }:
+                errors.append(f"{label}: primary metric direction is invalid")
+            try:
+                before = float(primary["before"])
+                after = float(primary["after"])
+                delta = float(primary["delta"])
+                improvement = float(primary["improvement"])
+            except (KeyError, TypeError, ValueError):
+                errors.append(f"{label}: primary metric values are invalid")
+            else:
+                if not _numbers_match(delta, after - before):
+                    errors.append(f"{label}: primary metric delta is inconsistent")
+                expected_improvement = (
+                    delta
+                    if primary.get("direction") == "higher_is_better"
+                    else -delta
+                )
+                if not _numbers_match(improvement, expected_improvement):
+                    errors.append(
+                        f"{label}: primary metric improvement is inconsistent"
+                    )
+                legacy_pp = card.get("primary_metric_change_pp")
+                if primary.get("unit") == "percentage_points":
+                    if not _numbers_match(legacy_pp, delta):
+                        errors.append(
+                            f"{label}: probability-point compatibility value is wrong"
+                        )
+                elif legacy_pp is not None:
+                    errors.append(
+                        f"{label}: non-probability primary metrics cannot claim pp"
+                    )
+        if card.get("decision_changed") not in (True, False):
+            errors.append(f"{label}: decision change state is missing")
+        if card.get("ranking_changed") not in (True, False):
+            errors.append(f"{label}: ranking change state is missing")
+        if card.get("action_before") not in {"draw", "stop"} or card.get(
+            "action_after"
+        ) not in {"draw", "stop"}:
+            errors.append(f"{label}: action decision is missing")
+        if card.get("cards_remaining_after") is None:
+            errors.append(f"{label}: remaining card count is missing")
+
+    lifecycle_seqs = [entry.get("seq") for entry in lifecycle]
+    if lifecycle_seqs != sorted(lifecycle_seqs):
+        errors.append("lifecycle entries must keep ascending order")
+    if len({(entry.get("seq"), entry.get("type")) for entry in lifecycle}) != len(
+        lifecycle
+    ):
+        errors.append(
+            "lifecycle entries must be unique per event and type; a derived "
+            "commitment and its upgrade may share one triggering seq"
+        )
+    overrides = report.get("stop_rule_overrides", [])
+    replay_overrides = [
+        entry
+        for entry in lifecycle
+        if entry.get("type") == "stop_rule_override"
+    ]
+    if overrides != replay_overrides:
+        errors.append("stop-rule overrides diverge from the replay lifecycle")
+    for entry in overrides:
+        if entry.get("rule") not in STOP_RULE_KEYS:
+            errors.append("stop-rule override names an unknown rule")
+        if entry.get("old_value") == entry.get("new_value"):
+            errors.append("stop-rule override must change the value")
+        if not entry.get("reason"):
+            errors.append("stop-rule override lost its reason")
+
+    counters = report.get("global_counters")
+    if not isinstance(counters, Mapping):
+        errors.append("global counters are missing")
+    else:
+        if counters.get("final_stop_conclusion") not in (
+            SESSION_REVIEW_STOP_CONCLUSIONS
+        ):
+            errors.append("final stop conclusion is not a known verdict")
+        if not counters.get("final_stop_conclusion_label"):
+            errors.append("final stop conclusion lost its label")
+        if recoverable:
+            if counters.get("draws_used") != len(openings):
+                errors.append("draw count disagrees with the replay openings")
+        draws_used = counters.get("draws_used")
+        max_draws = counters.get("max_draws")
+        if draws_used is None or int(draws_used) < 0:
+            errors.append("draw count is missing")
+        if max_draws is not None and int(max_draws) < int(draws_used):
+            errors.append("draw count exceeds the configured cap")
+
+    decision = report.get("decision_quality")
+    if not isinstance(decision, Mapping):
+        errors.append("decision quality section is missing")
+    else:
+        non_optimal = decision.get("non_optimal_openings", [])
+        expected_non_optimal = [
+            opening["seq"]
+            for opening in openings
+            if not opening.get("chosen_was_optimal")
+        ]
+        if non_optimal != expected_non_optimal:
+            errors.append("decision quality diverges from the openings")
+        if decision.get("all_openings_optimal") != (not expected_non_optimal):
+            errors.append("decision quality optimality flag is inconsistent")
+
+    outcome = report.get("outcome_quality")
+    if not isinstance(outcome, Mapping):
+        errors.append("outcome quality section is missing")
+    else:
+        if outcome.get("openings_total") != len(openings):
+            errors.append("outcome totals disagree with the openings")
+        counted = (
+            outcome.get("liked_hits", 0)
+            + outcome.get("neutral_results", 0)
+            + outcome.get("disliked_hits", 0)
+        )
+        if counted != len(openings):
+            errors.append("outcome classes must partition the openings")
+
+    model = report.get("model_quality")
+    if not isinstance(model, Mapping):
+        errors.append("model quality section is missing")
+    else:
+        scope = model.get("model_scope")
+        if not isinstance(scope, Mapping) or not scope.get(
+            "probability_statement"
+        ):
+            errors.append("model scope statement is missing")
+
+    bias = report.get("bias_checks")
+    if not isinstance(bias, Mapping):
+        errors.append("bias checks are missing")
+    else:
+        for key in ("sunk_cost_risk", "gambler_fallacy_risk"):
+            if bias.get(key) not in (True, False):
+                errors.append(f"bias check {key} must be a boolean")
+
+    if errors:
+        raise StateError(
+            "session review validation failed: " + "; ".join(errors)
+        )
+
+
 def validate_user_report(
     report: Mapping[str, Any],
     *,
@@ -3251,6 +5770,9 @@ def validate_user_report(
     """Fail closed when a reader-facing report is incomplete or inconsistent."""
     active, _ = _active_user_report(report)
     errors: List[str] = []
+    lifecycle = _report_lifecycle(report)
+    if lifecycle is not None:
+        errors.extend(_lifecycle_block_errors(lifecycle))
 
     if screen_tray:
         screening = active.get("tray_screening")
@@ -3668,6 +6190,77 @@ def validate_user_report(
                     errors.append("action targets an invalid tool route")
             else:
                 errors.append("action is unsupported")
+
+    summary = report.get("session_summary")
+    if isinstance(summary, Mapping):
+        if lifecycle is None:
+            errors.append("session tray lifecycle is missing")
+        else:
+            phase = lifecycle.get("phase")
+            if summary.get("lock_status") != phase:
+                errors.append("session lock status contradicts the lifecycle")
+            if summary.get("candidate_tray_id") != lifecycle.get(
+                "candidate_tray_id"
+            ):
+                errors.append("session candidate contradicts the lifecycle")
+            if phase in {"candidate", "accepted"}:
+                locked_id = lifecycle.get("accepted_tray_id")
+                if locked_id is None:
+                    locked_id = lifecycle.get("candidate_tray_id")
+                if locked_id != summary.get("active_tray_id"):
+                    errors.append(
+                        "the committed tray must remain the active tray"
+                    )
+            expected_lock_phases = {
+                "open": {"uncommitted"},
+                "candidate": {"candidate"},
+                "accepted": {"accepted"},
+            }.get(phase, set())
+            if phase == "accepted" and lifecycle.get("upgraded_from_candidate"):
+                # The ledger still physically holds the candidate commitment;
+                # only the derived quality-line upgrade reads as accepted.
+                expected_lock_phases = {"accepted", "candidate"}
+            active_lock = active.get("tray_lock")
+            if not isinstance(active_lock, Mapping):
+                errors.append("active tray lock is missing")
+            elif active_lock.get("phase") not in expected_lock_phases:
+                errors.append("active tray lock contradicts the lifecycle")
+        recommendation = report.get("session_recommendation")
+        if isinstance(recommendation, Mapping) and lifecycle is not None:
+            phase = lifecycle.get("phase")
+            if recommendation.get("release_required_before_switch") != (
+                phase != "open"
+            ):
+                errors.append(
+                    "session recommendation release flag contradicts the phase"
+                )
+            if phase == "open":
+                expected_tray = summary.get("active_tray_id")
+                expected_actions = {"follow_active_tray_report"}
+            elif phase == "candidate":
+                expected_tray = lifecycle.get("candidate_tray_id")
+                expected_actions = {
+                    "continue_with_candidate_tray",
+                    "continue_with_candidate_tray_tool_plan",
+                    "stop_or_release_candidate_tray",
+                }
+            else:
+                expected_tray = lifecycle.get("accepted_tray_id")
+                if expected_tray is None:
+                    expected_tray = lifecycle.get("candidate_tray_id")
+                expected_actions = {
+                    "continue_with_accepted_tray",
+                    "continue_with_accepted_tray_tool_plan",
+                    "stop_or_release_accepted_tray",
+                }
+            if recommendation.get("action") not in expected_actions:
+                errors.append(
+                    "session recommendation action contradicts the phase"
+                )
+            if recommendation.get("tray_id") != expected_tray:
+                errors.append(
+                    "session recommendation tray contradicts the lifecycle"
+                )
 
     if errors:
         raise StateError(
@@ -4103,9 +6696,90 @@ def _render_rule_overrides(report: Mapping[str, Any]) -> List[str]:
     return lines if len(lines) > 2 else []
 
 
+def _report_lifecycle(
+    report: Mapping[str, Any]
+) -> Optional[Mapping[str, Any]]:
+    """Read the commitment ladder from a session or legacy solo report."""
+    summary = report.get("session_summary")
+    if isinstance(summary, Mapping):
+        lifecycle = summary.get("tray_lifecycle")
+    else:
+        lifecycle = report.get("tray_lifecycle")
+    return lifecycle if isinstance(lifecycle, Mapping) else None
+
+
+def _lifecycle_sentence(lifecycle: Optional[Mapping[str, Any]]) -> str:
+    """One user-state sentence for the commitment ladder.
+
+    A missing block (legacy uncommitted solo reports) stays silent so the
+    legacy output is byte-compatible; every session report states its phase.
+    """
+    if lifecycle is None:
+        return ""
+    if lifecycle.get("phase") == "open":
+        return "当前端状态：未承诺（可自由换端；用卡或开盒会自动记录候选承诺）。"
+    if lifecycle.get("phase") == "accepted":
+        if lifecycle.get("upgraded_from_candidate"):
+            return (
+                "当前端状态：已接受（真实线索已通过全部质量线，由候选承诺自动"
+                "升级）；保持锁定，换端前需先说明理由并记录释放事件。"
+            )
+        return (
+            "当前端状态：已接受（锁定）；换端前需先说明理由并记录释放事件。"
+        )
+    source = lifecycle.get("commitment_source")
+    basis = (
+        "经多端横比或用户选定记录"
+        if source == "explicit_event"
+        else "首次真实用卡或开盒已自动承诺"
+    )
+    return (
+        f"当前端状态：候选承诺（{basis}，尚未达到全部质量线）；"
+        "达到全部质量线后自动升级为已接受，换端前需先说明理由并记录"
+        "释放事件。"
+    )
+
+
+def _attach_solo_lifecycle(
+    session: Mapping[str, Any],
+    report: MutableMapping[str, Any],
+) -> None:
+    """Attach the commitment ladder to a legacy single-tray report.
+
+    Uncommitted legacy inputs keep their exact prior output; only inputs
+    whose real card/open history implies a commitment gain the block.
+    """
+    candidate_tray_id = session.get("candidate_tray_id")
+    if candidate_tray_id is None and session.get("accepted_tray_id") is None:
+        return
+    state = session["_tray_states"][session["active_tray_id"]]
+    if "tray_screening" in report:
+        profile = report["tray_screening"]["acceptance_profile"]
+        decision = report["tray_screening"]["direct_draw_decision"]
+    else:
+        profile = _tray_acceptance_profile(state, report["ranking"][0])
+        decision = report["draw_decision"]
+    candidate_qualified = (
+        bool(profile)
+        and decision["should_draw"]
+        and all(check["passed"] for check in profile)
+    )
+    report["tray_lifecycle"] = _session_lifecycle_summary(
+        accepted_tray_id=session.get("accepted_tray_id"),
+        candidate_tray_id=candidate_tray_id,
+        commitment_source=session.get("_candidate_source"),
+        candidate_qualified=candidate_qualified,
+        accepted_source=session.get("_accepted_source"),
+        accepted_commitment_source=session.get(
+            "_accepted_commitment_source"
+        ),
+    )
+
+
 def _render_screening_markdown(
     report: Mapping[str, Any],
     tray_id: Optional[str],
+    lifecycle: Optional[Mapping[str, Any]] = None,
 ) -> str:
     screening = report["tray_screening"]
     status = screening["status"]
@@ -4116,10 +6790,19 @@ def _render_screening_markdown(
         "session_stop": "已触发全局抽数上限，建议停止。",
         "needs_acceptance_rules": "先补充质量线，再判断是否保留本端。",
         "accepted_review": "当前端已锁定；若要换端，先确认释放原因。",
+        "candidate_review": (
+            "当前端为候选承诺（已选定但未达线）；若要换端，先确认释放原因。"
+        ),
     }
     recommendation = screening["recommendation"]
     if recommendation == "release_before_switch":
-        conclusion = "当前端已锁定；若要换端，先确认释放原因。"
+        if status == "candidate_review":
+            conclusion = (
+                "当前端为候选承诺（已选定但未达线）；若要换端，先确认释放"
+                "原因。"
+            )
+        else:
+            conclusion = "当前端已锁定；若要换端，先确认释放原因。"
     else:
         conclusion = conclusions.get(status, f"当前状态：{status}。")
     lines = [
@@ -4128,6 +6811,9 @@ def _render_screening_markdown(
     ]
     if tray_id is not None:
         lines.extend([f"当前端：{_markdown_cell(tray_id)}", ""])
+    lifecycle_text = _lifecycle_sentence(lifecycle)
+    if lifecycle_text:
+        lines.extend([lifecycle_text, ""])
     lines.extend(["## 结论", "", conclusion, "", "## 质量线", ""])
     lines.extend(_render_stop_lines(screening["acceptance_profile"]))
     action = screening["one_card_action"]
@@ -4396,6 +7082,661 @@ def render_preference_calibration_markdown(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def render_preference_briefing_markdown(
+    report: Mapping[str, Any],
+) -> str:
+    """Render the zero-tray briefing without any current-tray claims."""
+    validate_preference_briefing_report(report)
+    baseline = report["blind_baseline"]
+    lines = [
+        f"# {_markdown_cell(report.get('series') or '盲盒')}｜偏好简报（无端参考线）",
+        "",
+    ]
+    if report["status"] == "needs_confirmation":
+        conclusion = (
+            "尚未观察任何一端盒位。已按完整端型算出盲抽基线，并为"
+            "「随便中个喜欢」给出参考线；本报告未推荐抽盒，也未改写停止线。"
+        )
+    elif report["status"] == "preference_conflict":
+        conclusion = (
+            "尚未观察任何一端盒位。偏好分组与评分存在未解决冲突；盲抽基线"
+            "仅供核对，本报告不生成参考线、不推荐抽盒，也不改写停止线。"
+        )
+    else:
+        conclusion = (
+            "尚未观察任何一端盒位。以下盲抽基线仅用于对照；当前策略无端不生成"
+            "参考线，本报告未推荐抽盒，也未改写停止线。"
+        )
+    lines.extend(["## 结论", "", conclusion, "", "## 盲抽基线", ""])
+    lines.extend(
+        [
+            "假设整端常规款无重复、每款一个；这是先验均匀分布，不是当前端校准。",
+            "",
+            "| 指标 | 盲抽值 |",
+            "|---|---:|",
+            f"| 常规款数 | {int(baseline['regular_count'])} |",
+            f"| 最爱款合计 | {_pp(baseline['p_favorite_any_pp'])} |",
+            f"| 喜欢款合计 | {_pp(baseline['p_like_any_pp'])} |",
+            f"| 不喜欢款合计 | {_pp(baseline['p_dislike_any_pp'])} |",
+            f"| 硬雷合计 | {_pp(baseline['p_hard_avoid_pp'])} |",
+        ]
+    )
+    if baseline.get("expected_score") is not None:
+        lines.append(
+            f"| 期望评分 | {float(baseline['expected_score']):.2f} |"
+        )
+    if baseline.get("resale_ev") is not None:
+        lines.append(
+            f"| 预期二手价值 | ¥{float(baseline['resale_ev']):.2f} |"
+        )
+    lines.extend(
+        [
+            "",
+            f"适用策略：「{report['strategy_name']}」——{report['strategy_rule']}",
+        ]
+    )
+
+    lines.extend(["", "## 偏好一致性", ""])
+    conflicts = report["preference_conflicts"]
+    if conflicts:
+        lines.extend(
+            [
+                "| 款式 | 显式字段 | 评分 | 评分档位 | 处理 |",
+                "|---|---|---:|---|---|",
+            ]
+        )
+        for conflict in conflicts:
+            lines.append(
+                "| {} | {} | {} | {} | 待确认 |".format(
+                    _markdown_cell(conflict["design"]),
+                    conflict["explicit_field"],
+                    f"{float(conflict['score']):g}",
+                    conflict["score_tier_label"],
+                )
+            )
+        lines.extend(
+            [
+                "",
+                "以上款式的显式分组与评分档位矛盾。旧状态读取时仍保留显式"
+                "字段，但不能据此生成参考线；请修改分组或评分后重跑。",
+            ]
+        )
+    elif report["status"] == "preference_conflict":
+        lines.append("偏好冲突未解决，参考线已阻塞。先统一分组与评分。")
+    else:
+        lines.append("显式偏好字段与逐款评分未发现方向矛盾。")
+
+    lines.extend(["", "## 参考线", ""])
+    reference = report["reference_lines"]
+    if report["status"] == "needs_confirmation":
+        lines.extend(
+            [
+                "以下参考线仅适用于「随便中个喜欢」：按五个百分点一档严格改善"
+                "盲抽基线，并使用 40% / 35% / 20% 平衡锚点。它们是判断性建议，确认前不写入 "
+                "`stop_rules`。",
+                "",
+                "| 规则 | 盲抽基线 | 建议线 | 相差 |",
+                "|---|---:|---:|---:|",
+            ]
+        )
+        for rule in reference["rules"]:
+            delta = float(rule["delta_vs_baseline_pp"])
+            lines.append(
+                f"| {rule['label']} | {_pp(rule['baseline_pp'])} | "
+                f"{float(rule['suggested_value']):.0f}% | {delta:+.2f}pp |"
+            )
+    elif report["status"] == "preference_conflict":
+        lines.append(
+            "先确认冲突款应以显式分组还是评分档位为准，并修改输入；"
+            "冲突消失后重新生成无端参考线。"
+        )
+    else:
+        lines.append(reference["redirect_other_strategies"])
+
+    existing = report["existing_stop_rules"]
+    if existing:
+        existing_parts: List[str] = []
+        quality_text = _calibration_rules_text(existing)
+        if quality_text != "无":
+            existing_parts.append(quality_text)
+        if "max_draws" in existing:
+            existing_parts.append(
+                f"最多抽 {int(existing['max_draws'])} 盒"
+            )
+        lines.extend(
+            [
+                "",
+                f"已有停止条件：{'；'.join(existing_parts)}。本报告未改写。",
+            ]
+        )
+    lines.extend(["", "## 下一步", ""])
+    if report["status"] == "needs_confirmation":
+        lines.append(
+            "确认后参考线写入既有 `stop_rules`（不新增第二套入场线）；"
+            "随后进入任一端补充盒位信息，先用 --screen-tray 判断端型。"
+        )
+    elif report["status"] == "preference_conflict":
+        lines.append(
+            "先统一冲突款的显式分组与评分；修改输入后重新生成简报。"
+        )
+    else:
+        lines.append(
+            "进入任一端补充盒位信息后，运行 --calibrate-preferences，"
+            "用当前端真实可达取舍确认边界；判断端型用 --screen-tray。"
+        )
+    lines.extend(["", "## 模型口径", ""])
+    lines.extend(_render_model_notes(report))
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _comparison_action_cell(action: Mapping[str, Any]) -> str:
+    tool = action.get("tool")
+    if tool == "hint":
+        return f"提示卡@{action.get('box_id')}"
+    if tool == "display":
+        return f"显示卡@{action.get('box_id')}"
+    return "免卡"
+
+
+def render_tray_comparison_markdown(report: Mapping[str, Any]) -> str:
+    """Render the multi-tray comparison in the fixed section order."""
+    validate_tray_comparison_report(report)
+    comparison = report["comparison"]
+    rows = comparison["rows"]
+    excluded = comparison["excluded_trays"]
+    recommendation = report["recommendation"]
+    session = report["session_summary"]
+    lines: List[str] = [
+        f"# {_markdown_cell(report.get('series') or '盲盒')}｜多端横比",
+        "",
+    ]
+
+    lines.extend(["## 结论", ""])
+    if rows:
+        top = rows[0]
+        horizon = (
+            "两步时域（仅头部候选端扩展）"
+            if recommendation["planning_horizon"] == "two_card"
+            else "一步时域"
+        )
+        if recommendation["first_action"] is None:
+            conclusion = (
+                f"共 {len(rows)} 个端参与排序，但排名靠前的端状态为"
+                f"「{top['status_label']}」，没有可直接执行的首步动作；"
+                f"本结论基于{horizon}。建议停止本轮或先补齐质量线/端信息。"
+            )
+        else:
+            first_cell = _comparison_action_cell(recommendation["first_action"])
+            conclusion = (
+                f"共 {len(rows)} 个可操作端完成独立求解。综合既有策略指标与"
+                f"质量线，推荐端为「{top['tray_id']}」（{top['status_label']}），"
+                f"首步动作：{first_cell}；本结论基于{horizon}。"
+            )
+        if recommendation.get("release_required_before_switch"):
+            accepted_id = session.get("accepted_tray_id")
+            candidate_id = session.get("candidate_tray_id")
+            if accepted_id is not None:
+                conclusion += (
+                    f" 当前已接受端为「{accepted_id}」；换端前"
+                    "需先说明理由并记录释放事件。"
+                )
+            else:
+                conclusion += (
+                    f" 当前候选承诺端为「{candidate_id}」（尚未达到全部"
+                    "质量线）；换端前需先说明理由并记录释放事件。"
+                )
+        conclusion += " 换端或等下一端不保证更好。"
+    else:
+        conclusion = (
+            "本会话没有仍可操作的端参与排序；已释放、历史只读或无可用盒的"
+            "端只进入复盘。建议停止本轮或先补齐端信息。"
+        )
+    lines.extend([conclusion, ""])
+
+    lines.extend(["## 逐端比较", ""])
+    if rows:
+        lines.extend(
+            [
+                "每端独立求解；盒号、排除、已售未知与后验不跨端共享。",
+                "",
+                "| 排名 | 端 | 直接最佳盒 | 最爱合计 | 喜欢合计 | 总雷 | 硬雷 | 直接状态 | 首张道具 | 道具后仍可抽 |",
+                "|---:|---|---|---:|---:|---:|---:|---|---|---:|",
+            ]
+        )
+        for row in rows:
+            metrics = row["metrics"]
+            markers = []
+            if row.get("is_accepted_tray"):
+                markers.append("已接受")
+            elif row.get("is_candidate_tray"):
+                markers.append("候选承诺")
+            if row.get("is_active_tray"):
+                markers.append("当前端")
+            tray_cell = row["tray_id"] + (
+                f"（{'、'.join(markers)}）" if markers else ""
+            )
+            lines.append(
+                "| {} | {} | {}号 | {} | {} | {} | {} | {} | {} | {} |".format(
+                    int(row["rank"]),
+                    _markdown_cell(tray_cell),
+                    row["direct_best_box_id"],
+                    _pp(metrics["p_favorite_any_pp"]),
+                    _pp(metrics["p_like_any_pp"]),
+                    _pp(metrics["p_dislike_any_pp"]),
+                    _pp(metrics["p_hard_avoid_pp"]),
+                    row["status_label"],
+                    _comparison_action_cell(row["first_tool_action"]),
+                    _pp(row["post_tool_draw_probability_pp"]),
+                )
+            )
+        lines.extend(
+            [
+                "",
+                f"{comparison['rescue_probability_semantics']}"
+                " 排序沿用既有策略与停止线；直接合格端先比策略指标，"
+                "实用容差内等价时优先不用卡。",
+            ]
+        )
+        depth_two = comparison.get("depth_two")
+        if depth_two:
+            lines.extend(
+                [
+                    "",
+                    "### 两步时域（仅头部候选端）",
+                    "",
+                ]
+            )
+            for tray_id in depth_two["head_candidate_tray_ids"]:
+                row = next(
+                    item for item in rows if item["tray_id"] == tray_id
+                )
+                detail = row["depth_two_detail"]
+                changed = "变化" if detail[
+                    "first_action_changed_vs_depth_1"
+                ] else "不变"
+                equivalent = (
+                    "实用容差内等价"
+                    if detail[
+                        "terminal_value_practically_equivalent_to_depth_1"
+                    ]
+                    else "不等价"
+                )
+                gain = detail.get("primary_gain_vs_one_card_pp")
+                gain_text = (
+                    f"两步较一步终局主指标增益 {float(gain):+.2f}pp"
+                    if gain is not None
+                    else "两步较一步终局主指标增益未定义"
+                )
+                lines.append(
+                    f"- 「{tray_id}」：两步推荐首步 "
+                    f"{_comparison_action_cell(detail['recommended_action'])}"
+                    f"（相对一步：首步{changed}，终局{equivalent}；{gain_text}）。"
+                )
+            lines.append(
+                f"- 其余 {len(rows) - len(depth_two['head_candidate_tray_ids'])} "
+                "个端保持一步时域结果。"
+            )
+    else:
+        lines.append("没有可排序的端。")
+    if excluded:
+        lines.extend(
+            [
+                "",
+                "### 未参与排序的端（仅复盘）",
+                "",
+                "| 端 | 原因 | 可抽盒数 | 已开盒数 |",
+                "|---|---|---:|---:|",
+            ]
+        )
+        for item in excluded:
+            lines.append(
+                "| {} | {} | {} | {} |".format(
+                    _markdown_cell(item["tray_id"]),
+                    item["reason_label"],
+                    int(item["drawable_box_count"]),
+                    int(item["opened_box_count"]),
+                )
+            )
+
+    lines.extend(["", "## 下一步（推荐端与首步动作）", ""])
+    if rows and recommendation["first_action"] is not None:
+        first_cell = _comparison_action_cell(recommendation["first_action"])
+        lines.append(
+            f"在推荐端「{recommendation['recommended_tray_id']}」执行："
+            f"{first_cell}。"
+        )
+        commitment = recommendation.get("commitment_after_action")
+        if isinstance(commitment, Mapping):
+            lines.append(
+                "该端当前依赖道具，不是直接合格：选定后先记录候选承诺"
+                "（tray_committed 事件）；真实线索通过全部质量线后自动升级"
+                "为已接受，换端前需先说明理由并记录释放事件。"
+            )
+        if recommendation["planning_horizon"] == "two_card":
+            lines.append(
+                "时域：两步规划仅扩展了头部候选端；请以推荐端标注的首步"
+                "动作为准，第二步在第一步结果后重算。"
+            )
+        else:
+            lines.append(
+                "时域：默认一步规划；需要比较两步时域时再显式运行 "
+                "--compare-depth 2。"
+            )
+        lines.append(
+            "多端横比不重置偏好、质量线、卡数、抽数和历史证据；单端路径"
+            "仍以 --screen-tray 或正式报告为准。"
+        )
+    else:
+        lines.append("本轮建议停止或先补齐端信息；没有可执行的首步动作。")
+
+    lines.extend(["", "## 质量线", ""])
+    rules_text = _calibration_rules_text(report["stop_rules"])
+    lines.extend(
+        [
+            f"适用策略：「{report['strategy_name']}」——{report['strategy_rule']}",
+            f"质量线：{rules_text}。",
+        ]
+    )
+    if "max_draws" in report["stop_rules"]:
+        lines.append(
+            f"最多抽 {int(report['stop_rules']['max_draws'])} 盒"
+            f"（全会话已用 {int(session['draws_used'])} 盒）。"
+        )
+    lines.append("质量线与预算为会话共享；本报告未改写任何停止条件。")
+
+    lines.extend(["", "## 模型口径", ""])
+    model_lines = _render_model_notes(report)
+    independent = report["model_summary"].get("independent_trays")
+    if independent:
+        model_lines.append(f"- {independent}")
+    lines.extend(model_lines)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _format_review_pp(value: Optional[float]) -> str:
+    if value is None:
+        return "不可恢复"
+    return f"{float(value):.2f}%"
+
+
+def _render_review_opening(
+    opening: Mapping[str, Any], index: int
+) -> List[str]:
+    probabilities = opening["outcome_class_probabilities_pp"]
+    ranked = "、".join(
+        f"{item['design']} {_format_review_pp(item['probability_pp'])}"
+        for item in opening["possible_designs_ranked"]
+    )
+    rank = opening["actual_design_rank"]
+    rank_text = f"第 {int(rank)} 位" if rank is not None else "不在可能款列表中"
+    lines = [
+        f"### 第 {index} 次开盒（事件 {opening['seq']}，"
+        f"端 {opening['tray_id']}，盒 {opening['box_id']} → "
+        f"{opening['design']}）",
+        "",
+        f"- 实际款事前概率：{_format_review_pp(opening['actual_design_prior_pp'])}"
+        f"（可能款排名 {rank_text}：{ranked}）",
+        f"- 结果类概率：喜欢 {_format_review_pp(probabilities['liked'])}、"
+        f"中性 {_format_review_pp(probabilities['neutral'])}、"
+        f"不喜欢 {_format_review_pp(probabilities['disliked'])}、"
+        f"硬雷 {_format_review_pp(probabilities['hard_avoid'])}",
+        f"- 当时接受的失败概率："
+        f"{_format_review_pp(opening['accepted_failure_pp'])}"
+        f"（{opening['failure_semantics']}）",
+    ]
+    checks = opening["quality_lines_at_draw"]
+    if checks:
+        rendered = "；".join(
+            f"{check['rule']} {check['actual']:.2f}"
+            f"{'≥' if check['operator'] == '>=' else '≤'}"
+            f"{check['threshold']:.2f}"
+            f"（{'过' if check['passed'] else '未过'}）"
+            for check in checks
+        )
+        lines.append(f"- 当时质量线：{rendered}")
+    else:
+        lines.append("- 当时质量线：未配置")
+    if opening["chosen_was_optimal"]:
+        lines.append("- 所选盒为决策时点最优盒")
+    else:
+        alternative = opening["strongest_alternative"]
+        lines.append(
+            f"- 所选盒非最优；当时最强备选：盒 {alternative['box_id']}"
+            f"（喜欢 {_format_review_pp(alternative['p_like_any_pp'])}，"
+            f"喜欢概率差 {alternative['p_like_any_delta_pp']:+.2f}pp）"
+        )
+    return lines
+
+
+def _render_review_tool_card(card: Mapping[str, Any]) -> List[str]:
+    result = card["real_result"]
+    result_text = (
+        f"排除了 {result['excluded']}"
+        if "excluded" in result
+        else f"显示为 {result['revealed']}"
+    )
+    branch = card["ex_ante_drawable_branch_pp"]
+    branch_text = (
+        _format_review_pp(branch)
+        if card["ex_ante_branch_available"]
+        else "不可恢复"
+    )
+    change = card["primary_metric_change"]
+    metric_labels = {
+        "severity_weighted_dislike": "严重度加权雷款风险",
+        "p_like_any": "喜欢款概率",
+        "p_favorite_any": "最爱款概率",
+        "p_top_score_group": "最高分组概率",
+        "p_top_liked": "第一目标概率",
+        "expected_score": "期望评分",
+        "legacy_utility": "综合效用",
+        "resale_ev": "预期二手价值",
+    }
+    unit = change["unit"]
+    if unit in {"percentage_points", "severity_weighted_probability_points"}:
+        change_text = (
+            f"{float(change['before']):.2f} → {float(change['after']):.2f}"
+            f"（{float(change['delta']):+.2f}pp）"
+        )
+    elif unit == "CNY":
+        change_text = (
+            f"¥{float(change['before']):.2f} → ¥{float(change['after']):.2f}"
+            f"（{float(change['delta']):+.2f} 元）"
+        )
+    else:
+        change_text = (
+            f"{float(change['before']):.2f} → {float(change['after']):.2f}"
+            f"（{float(change['delta']):+.2f}）"
+        )
+    action_labels = {"draw": "抽", "stop": "停"}
+    return [
+        f"### 事件 {card['seq']}：{SESSION_REVIEW_TOOL_LABELS[card['tool']]}"
+        f" → 端 {card['tray_id']} 盒 {card['box_id']}",
+        "",
+        f"- 真实结果：{result_text}",
+        f"- 事前用卡后仍可抽分支概率：{branch_text}",
+        f"- 策略主指标（{metric_labels.get(change['metric'], change['metric'])}）："
+        f"{change_text}",
+        f"- 最佳盒：{card['best_box_before']} → {card['best_box_after']}；"
+        f"排序是否变化：{'是' if card['ranking_changed'] else '否'}",
+        f"- 行动：{action_labels[card['action_before']]} → "
+        f"{action_labels[card['action_after']]}；是否决定行动："
+        f"{'是' if card['decision_changed'] else '否'}；"
+        f"用后该类卡剩余 {int(card['cards_remaining_after'])} 张",
+    ]
+
+
+def render_session_review_markdown(report: Mapping[str, Any]) -> str:
+    validate_session_review_report(report)
+    summary = report["session_summary"]
+    replay = report["replay"]
+    counters = report["global_counters"]
+    decision = report["decision_quality"]
+    outcome = report["outcome_quality"]
+    bias = report["bias_checks"]
+
+    lines: List[str] = [
+        f"# 盲盒整轮自动复盘：{report.get('series') or '合成会话'}",
+        "",
+        "## 复盘结论",
+        "",
+        f"- 停止结论：{counters['final_stop_conclusion_label']}",
+        f"- 已抽 {int(counters['draws_used'])} 盒"
+        + (
+            f"（上限 {int(counters['max_draws'])} 盒）"
+            if counters["max_draws"] is not None
+            else "（未设上限）"
+        )
+        + f"；剩余提示卡 {int(summary['remaining_tools'].get('hint_cards', 0))} 张、"
+        f"显示卡 {int(summary['remaining_tools'].get('display_cards', 0))} 张",
+        f"- 决策质量："
+        + (
+            "历史不足，无法逐次判断"
+            if not replay["recoverable"]
+            else (
+                "全部开盒均为决策时点最优"
+                if decision["all_openings_optimal"]
+                else "有 {} 次非最优开盒（事件 {}）".format(
+                    len(decision["non_optimal_openings"]),
+                    "、".join(
+                        str(seq) for seq in decision["non_optimal_openings"]
+                    ),
+                )
+            )
+        ),
+        f"- 结果质量："
+        + (
+            "历史不足，仅当前状态显示已抽 {} 盒，未逐次归类".format(
+                int(counters["draws_used"])
+            )
+            if not replay["recoverable"]
+            else "喜欢 {}、不喜欢 {}（含硬雷 {}）、中性 {}，共 {} 次".format(
+                outcome["liked_hits"],
+                outcome["disliked_hits"],
+                outcome["hard_avoid_hits"],
+                outcome["neutral_results"],
+                outcome["openings_total"],
+            )
+        ),
+        f"- 偏差检查：沉没成本风险"
+        f"{'有' if bias['sunk_cost_risk'] else '无'}、赌徒谬误风险"
+        f"{'有' if bias['gambler_fallacy_risk'] else '无'}（仅用事前信息判断）",
+        f"- 数据可恢复性："
+        + (
+            "事件账本完整，整轮确定性回放"
+            if replay["recoverable"]
+            else f"存在不可恢复项（{replay['unrecoverable_reason']}），"
+            "未用当前概率编造历史数字"
+        ),
+    ]
+
+    lines.extend(["", "## 开盒逐次复盘", ""])
+    if replay["openings"]:
+        for index, opening in enumerate(replay["openings"], start=1):
+            lines.extend(_render_review_opening(opening, index))
+            lines.append("")
+    else:
+        if replay["recoverable"]:
+            lines.append("本轮事件账本中没有开盒记录。")
+        else:
+            lines.append("无可回放的开盒记录；历史不足的逐次数据已标记不可恢复。")
+        lines.append("")
+
+    lines.extend(["## 道具卡逐张复盘", ""])
+    if replay["tool_cards"]:
+        for card in replay["tool_cards"]:
+            lines.extend(_render_review_tool_card(card))
+            lines.append("")
+    else:
+        lines.append("无可回放的用卡记录。")
+        lines.append("")
+
+    lines.extend(["## 承诺与止损线变更", ""])
+    if replay["lifecycle"]:
+        for entry in replay["lifecycle"]:
+            label = SESSION_REVIEW_EVENT_LABELS.get(
+                entry["type"], entry["type"]
+            )
+            source = entry.get("source")
+            if source == "first_tool_or_open":
+                label += "（自动）"
+            elif source == "quality_lines_upgrade":
+                label += "（达线升级）"
+            text = f"- 事件 {entry['seq']}：{label}（端 {entry['tray_id']}）"
+            if entry["type"] == "stop_rule_override":
+                text += (
+                    f"：{entry['rule']} {entry['old_value']} → "
+                    f"{entry['new_value']}（{entry['reason']}）"
+                )
+            elif entry.get("reason"):
+                text += f"：{entry['reason']}"
+            lines.append(text)
+    else:
+        lines.append("- 无切端、承诺、接受、释放或停止线变更记录。")
+    lines.append("")
+
+    lines.extend(
+        [
+            "## 预算与停止结论",
+            "",
+            f"- 剩余提示卡 {int(counters['remaining_tools'].get('hint_cards', 0))} 张、"
+            f"显示卡 {int(counters['remaining_tools'].get('display_cards', 0))} 张；"
+            f"已抽 {int(counters['draws_used'])} 盒",
+            f"- 最终停止结论：{counters['final_stop_conclusion_label']}",
+            (
+                "全局剩余卡、已抽盒数、上限与事件账本逐项核对一致。"
+                if replay["recoverable"]
+                else "剩余卡与已抽盒数来自当前状态；缺少事件账本，无法逐事件核对。"
+            ),
+            "",
+            "## 决策、结果与模型质量",
+            "",
+            "- 决策质量只与决策时点的最强备选比较，不使用开盒后信息倒推。",
+            f"- 模型质量："
+            + (
+                "无零概率矛盾事件"
+                if not report["model_quality"]["zero_probability_openings"]
+                else "事件 {} 的开盒结果在事前概率为零，模型口径需复核".format(
+                    "、".join(
+                        str(seq)
+                        for seq in report["model_quality"][
+                            "zero_probability_openings"
+                        ]
+                    )
+                )
+            ),
+            "- 结果好坏不反推决策好坏：两者分开陈述。",
+            "",
+            "## 模型口径",
+            "",
+        ]
+    )
+    lines.extend(
+        _render_model_notes(
+            {
+                "model_summary": report["model_quality"]["model_scope"],
+                "model_warnings": report["model_quality"][
+                    "model_warnings"
+                ],
+            }
+        )
+    )
+
+    if not replay["recoverable"]:
+        lines.extend(
+            [
+                "",
+                "## 不可恢复项",
+                "",
+                "以下历史字段无法从当前状态唯一还原，已标记不可恢复，"
+                "未用当前概率替代：",
+            ]
+        )
+        for item in replay["unrecoverable_items"]:
+            lines.append(f"- {item['field']}：{item['reason']}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def render_user_markdown(
     report: Mapping[str, Any],
     *,
@@ -4404,8 +7745,9 @@ def render_user_markdown(
     """Render the validated standard report; never fall back to a summary."""
     validate_user_report(report, screen_tray=screen_tray)
     active, tray_id = _active_user_report(report)
+    lifecycle = _report_lifecycle(report)
     if screen_tray:
-        return _render_screening_markdown(active, tray_id)
+        return _render_screening_markdown(active, tray_id, lifecycle)
 
     conclusion, next_action = _conclusion_and_next_action(active)
     event_clause = _latest_event_clause(report, tray_id)
@@ -4419,6 +7761,9 @@ def render_user_markdown(
     ]
     if tray_id is not None:
         lines.extend([f"当前端：{_markdown_cell(tray_id)}", ""])
+    lifecycle_text = _lifecycle_sentence(lifecycle)
+    if lifecycle_text:
+        lines.extend([lifecycle_text, ""])
     lines.extend(
         [
             "## 结论",
@@ -4459,235 +7804,35 @@ def render_user_markdown(
 
 
 def _round_floats(obj: Any, digits: int = 8) -> Any:
-    if isinstance(obj, float):
-        return round(obj, digits)
-    if isinstance(obj, list):
-        return [_round_floats(x, digits) for x in obj]
-    if isinstance(obj, dict):
-        return {k: _round_floats(v, digits) for k, v in obj.items()}
-    return obj
-
-
-COMPACT_BRANCH_KEYS = (
-    "outcome",
-    "probability",
-    "best_box_after_outcome",
-    "recommended_draw_after_outcome",
-    "next_action_after_outcome",
-)
-
-
-def _compact_branch(branch: Mapping[str, Any]) -> Dict[str, Any]:
-    """Reduce one outcome branch to its decision-relevant summary.
-
-    The workflow is adaptive: apply one real outcome, then rerun the solver on
-    the updated state. Full per-branch metrics are therefore audit data; keep
-    them only with ``--full-branches``.
-    """
-    compact = {key: branch[key] for key in COMPACT_BRANCH_KEYS if key in branch}
-    decision = branch.get("draw_decision_after_outcome")
-    if decision is not None and not decision["should_draw"]:
-        compact["stop_reasons"] = list(decision["reasons"])
-    return compact
-
-
-def _slim_plan(
-    plan: Mapping[str, Any], top_actions: int, full_branches: bool
-) -> Dict[str, Any]:
-    slimmed = dict(plan)
-    if full_branches:
-        ranking = list(plan["action_ranking"])
-    else:
-        ranking = []
-        for action in plan["action_ranking"]:
-            compact_action = dict(action)
-            compact_action["branches"] = [
-                _compact_branch(branch) for branch in action["branches"]
-            ]
-            ranking.append(compact_action)
-    if top_actions > 0 and len(ranking) > top_actions:
-        slimmed["other_actions_ranked"] = [
-            _action_summary(action) for action in ranking[top_actions:]
-        ]
-        ranking = ranking[:top_actions]
-    slimmed["action_ranking"] = ranking
-    if ranking:
-        slimmed["recommended_action"] = ranking[0]
-    if isinstance(slimmed.get("baseline_best_draw"), Mapping):
-        slimmed["baseline_best_draw"] = slimmed["baseline_best_draw"]["box_id"]
-    return slimmed
+    try:
+        from scripts.blindbox_cli import _round_floats as round_output
+    except ModuleNotFoundError:
+        from blindbox_cli import _round_floats as round_output
+    return round_output(obj, digits)
 
 
 def _slim_report(
     report: Mapping[str, Any], top_actions: int, full_branches: bool
 ) -> Dict[str, Any]:
-    """Output-layer slimming; plan_tools results themselves stay complete."""
-    if "tray_reports" in report:
-        slimmed = dict(report)
-        slimmed["tray_reports"] = {
-            tray_id: _slim_report(tray_report, top_actions, full_branches)
-            for tray_id, tray_report in report["tray_reports"].items()
-        }
-        return slimmed
-    plan = report.get("next_tool_plan")
-    if plan is None:
-        return dict(report)
-    slimmed = dict(report)
-    slimmed["next_tool_plan"] = _slim_plan(plan, top_actions, full_branches)
-    return slimmed
+    try:
+        from scripts.blindbox_cli import _slim_report as slim_output
+    except ModuleNotFoundError:
+        from blindbox_cli import _slim_report as slim_output
+    return slim_output(
+        report,
+        top_actions,
+        full_branches,
+        _action_summary,
+    )
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("state", help="Path to state JSON, or - for stdin")
-    parser.add_argument(
-        "--plan-one",
-        action="store_true",
-        help="Backward-compatible alias for --plan-depth 1",
-    )
-    parser.add_argument(
-        "--plan-depth",
-        type=int,
-        choices=(1, 2),
-        help="Plan up to one or two adaptive card actions before drawing/stopping",
-    )
-    parser.add_argument(
-        "--screen-tray",
-        action="store_true",
-        help=(
-            "Assess whether to keep the current tray; defaults to one-card "
-            "planning and reports reusable acceptance lines"
-        ),
-    )
-    parser.add_argument(
-        "--calibrate-preferences",
-        action="store_true",
-        help=(
-            "Use complete per-design scores to show current-tray attainable "
-            "ranges and candidate stop-rule bundles without recommending a draw"
-        ),
-    )
-    parser.add_argument(
-        "--top-actions",
-        type=int,
-        default=3,
-        help=(
-            "Keep only the top N ranked tool actions in next_tool_plan; "
-            "truncated ones collapse to other_actions_ranked summaries. "
-            "0 keeps every action."
-        ),
-    )
-    parser.add_argument(
-        "--full-branches",
-        action="store_true",
-        help=(
-            "Keep full per-branch metrics in next_tool_plan instead of the "
-            "compact decision summary (audit mode)."
-        ),
-    )
-    parser.add_argument(
-        "--beam-width",
-        type=int,
-        default=3,
-        help=(
-            "At depth 2, expand the second layer only for the top N depth-1 "
-            "card actions. 0 disables truncation (exact but slower)."
-        ),
-    )
-    parser.add_argument(
-        "--format",
-        choices=("json", "markdown"),
-        default="json",
-        help=(
-            "Output JSON (backward-compatible default) or the validated "
-            "reader-facing Markdown report"
-        ),
-    )
-    parser.add_argument("--indent", type=int, default=0)
-    parser.add_argument("--digits", type=int, default=8)
-    args = parser.parse_args(argv)
-
+    """Delegate CLI parsing and mode routing to the focused CLI module."""
     try:
-        if args.top_actions < 0:
-            raise StateError("--top-actions must be >= 0")
-        if args.beam_width < 0:
-            raise StateError("--beam-width must be >= 0")
-        session = _normalize_session(_read_json(args.state))
-        if args.plan_one and args.plan_depth not in {None, 1}:
-            raise StateError("--plan-one cannot be combined with --plan-depth 2")
-        if args.calibrate_preferences and (
-            args.plan_one
-            or args.plan_depth is not None
-            or args.screen_tray
-        ):
-            raise StateError(
-                "--calibrate-preferences cannot be combined with planning or "
-                "--screen-tray"
-            )
-        requested_depth = 1 if args.plan_one else args.plan_depth
-        if (
-            args.format == "markdown"
-            and requested_depth is None
-            and not args.calibrate_preferences
-        ):
-            requested_depth = 1
-        if args.calibrate_preferences:
-            active_tray_id = session["active_tray_id"]
-            state = session["_tray_states"][active_tray_id]
-            report = build_preference_calibration_report(
-                state,
-                tray_id=(
-                    None
-                    if session["_legacy_input"]
-                    else active_tray_id
-                ),
-            )
-            if args.format == "markdown":
-                markdown = render_preference_calibration_markdown(report)
-        else:
-            if session["_legacy_input"]:
-                state = session["_tray_states"][session["active_tray_id"]]
-                report = build_report(
-                    state,
-                    plan_depth=requested_depth,
-                    screen_tray=args.screen_tray,
-                    beam_width=args.beam_width,
-                )
-            else:
-                report = build_session_report(
-                    session,
-                    plan_depth=requested_depth,
-                    screen_tray=args.screen_tray,
-                    beam_width=args.beam_width,
-                )
-            if args.format == "markdown":
-                markdown = render_user_markdown(
-                    report,
-                    screen_tray=args.screen_tray,
-                )
-            else:
-                report = _slim_report(
-                    report,
-                    args.top_actions,
-                    args.full_branches,
-                )
-    except (OSError, json.JSONDecodeError, StateError) as exc:
-        print(json.dumps({"error": str(exc)}, ensure_ascii=False, indent=2), file=sys.stderr)
-        return 2
-
-    if args.format == "markdown":
-        print(markdown, end="")
-        return 0
-
-    print(
-        json.dumps(
-            _round_floats(report, args.digits),
-            ensure_ascii=False,
-            indent=args.indent,
-            sort_keys=False,
-        )
-    )
-    return 0
+        from scripts.blindbox_cli import run_cli
+    except ModuleNotFoundError:
+        from blindbox_cli import run_cli
+    return run_cli(sys.modules[__name__], argv)
 
 
 if __name__ == "__main__":
