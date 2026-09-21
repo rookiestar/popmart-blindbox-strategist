@@ -64,6 +64,10 @@ class SkillContractTests(unittest.TestCase):
             for path in ROOT.rglob("*")
             if path.is_file()
             and ".git" not in path.parts
+            and not any(
+                part in {".private", ".local", "local-data", "sessions", "screenshots"}
+                for part in path.parts
+            )
             and "__pycache__" not in path.parts
             and path.suffix in {".md", ".json", ".py"}
         )

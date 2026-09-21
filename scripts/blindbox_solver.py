@@ -579,6 +579,38 @@ def _normalize_state(raw: Mapping[str, Any]) -> Dict[str, Any]:
             for design in union_designs:
                 scores.setdefault(design, score_default)
 
+    # Tool branches normalize a public copy of an already normalized state.
+    # Generated lists are not an explicit preference order. Preserve their
+    # provenance unless the caller actually edited the list.
+    previous_tiers = preferences.get("score_tiers", {})
+    previous_sources = preferences.get("preference_sources", {})
+    if isinstance(previous_tiers, Mapping) and isinstance(previous_sources, Mapping):
+        previous_groups = {
+            "liked": (
+                previous_tiers.get("favorite", []) + previous_tiers.get("liked", [])
+            ),
+            "disliked": (
+                previous_tiers.get("hard_avoid", [])
+                + previous_tiers.get("light_dislike", [])
+            ),
+            "hard_avoid": previous_tiers.get("hard_avoid", []),
+        }
+        if (
+            previous_sources.get("liked") in {"scores", "empty_default"}
+            and explicit_liked == previous_groups["liked"]
+        ):
+            liked_supplied = False
+        if (
+            previous_sources.get("disliked") in {"scores", "empty_default"}
+            and explicit_disliked == previous_groups["disliked"]
+        ):
+            disliked_supplied = False
+        if (
+            previous_sources.get("hard_avoid") in {"scores", "empty_default"}
+            and explicit_hard_avoid == previous_groups["hard_avoid"]
+        ):
+            hard_avoid_supplied = False
+
     score_tiers = _build_score_tiers(scores)
     preferences["score_tiers"] = score_tiers
     preferences["liked"] = (
@@ -1821,7 +1853,12 @@ def available_box_metrics(
     ]
     if not rows:
         raise StateError("there are no drawable boxes")
-    return _sort_metrics(rows, state)
+    # Rank the feasible choices first, keeping the strategy's ordering within
+    # each group. If none qualify, retain the best failed choice for diagnosis.
+    return sorted(
+        _sort_metrics(rows, state),
+        key=lambda row: not evaluate_draw_decision(state, row)["should_draw"],
+    )
 
 
 def _terminal_best(state: Mapping[str, Any], posterior: PosteriorResult) -> Dict[str, Any]:
@@ -2688,6 +2725,7 @@ def build_report(
         row = dict(metrics)
         row["status"] = boxes_by_id[box_id]["status"]
         row["tool_used"] = boxes_by_id[box_id]["tool_used"]
+        row["stop_rule_checks"] = _report_stop_rule_checks(state, metrics)
         row["explicitly_excluded"] = sorted(explicitly_excluded)
         row["remaining_options_desc"] = options
         row["remaining_options_probability_sum"] = sum(
@@ -6441,7 +6479,22 @@ def _strategy_comparison_sentence(
         if lower_is_better
         else first_value > second_value
     )
-    if math.isclose(first_value, second_value, abs_tol=1e-12):
+    failed_second_checks = [
+        check for check in second.get("stop_rule_checks", []) if not check["passed"]
+    ]
+    if (
+        all(check["passed"] for check in report["stop_rule_checks"])
+        and failed_second_checks
+    ):
+        failed_labels = "、".join(
+            REPORT_RULE_LABELS.get(check["rule"], check["rule"])
+            for check in failed_second_checks
+        )
+        comparison = (
+            f"首选通过全部停止线；{second['box_id']} 号未通过「{failed_labels}」，"
+            "因此先选达线盒，再比较目标概率"
+        )
+    elif math.isclose(first_value, second_value, abs_tol=1e-12):
         comparison = "持平，由后续指标破平"
     elif favorable:
         direction = "低" if lower_is_better else "高"
@@ -6539,6 +6592,13 @@ def _conclusion_and_next_action(
         return conclusion, next_action
     if action["action"] == "direct_draw":
         box_id = action["box_id"]
+        max_draws = report["stop_rules"].get("max_draws")
+        opened_count = report["draw_decision"]["opened_count"]
+        if max_draws is not None and opened_count + 1 >= max_draws:
+            return (
+                f"建议抽 {box_id} 号。",
+                f"抽 {box_id} 号；开盒后达到本轮最多 {max_draws} 盒，记录结果并结束，不追抽。",
+            )
         return (
             f"建议抽 {box_id} 号。",
             f"抽 {box_id} 号；开盒后记录结果，再判断是否继续。",
