@@ -1,6 +1,8 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/runkids/skillshare/main/schemas/project-config.schema.json
 targets:
-  - codex
+  - name: codex
+    skills:
+      mode: copy
 skills:
   - name: popmart-blindbox-strategist
     source: .skillshare/skills/popmart-blindbox-strategist

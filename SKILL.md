@@ -1,6 +1,6 @@
 ---
 name: popmart-blindbox-strategist
-description: Guide a user from a POP MART tray screenshot to a confirmed draw goal, then research current series heat without requiring a search API key, parse online blind-box trays, screen timed trays, compute exact tray-level probabilities, optimize hint/display cards, update after clues, and review draws. Use for 泡泡玛特、在线抽盒机、摇盒、换端、端筛选、提示卡、显示卡、抽盒概率、盲盒复盘. Do not use for ordinary retail shopping without tray-level clues.
+description: "分析泡泡玛特在线抽盒机盘面、线索和抽盒概率，辅助选盘、用卡及复盘；普通零售购物不触发。"
 ---
 
 # POP MART blind-box strategist
