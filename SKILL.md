@@ -50,9 +50,10 @@ Read only what the current stage needs:
     accepted. Keep either lock until the user explicitly releases it with a
     reason. Record any stop-rule change with its old value, new value, and
     confirmed reason.
-16. **Relay the validated report.** Every formal draw decision uses the
-    solver's Markdown renderer as the sole user-facing decision body. Do not
-    paraphrase, reorder, shorten, or rebuild its required sections.
+16. **Use one calculation for both views.** Formal decisions use the validated
+    full Markdown report. For “why”, “explain simply”, or a short follow-up,
+    use `--explain --format markdown`; it renders the same decision and branch
+    probabilities. Never retype probability tables by hand.
 
 ## Stage 0 — Guided intake
 
@@ -176,10 +177,12 @@ or confirms the Stage 0 decision contract.
 5. If one or more cells are unreadable, ask a targeted question only about those cells. Do not calculate from guessed text.
 6. Convert the session to the JSON format in `references/state-schema.md`.
    Preserve any confirmed guided state and do not ask the user to restate it.
-7. Give every tray a stable ID. On the first switch, promote the legacy
-   single-tray state to the multi-tray session envelope. Keep preferences,
-   remaining tools, and draws used at session level; keep posterior evidence
-   inside its originating tray.
+7. Start with the session envelope even for one tray. Use
+   `--session-state` to export a canonical state after each update, preserving
+   generated commitment/acceptance events and locks. An imported legacy state
+   becomes an observed `initial_boxes` snapshot; earlier card/open history
+   stays unknown, while subsequent events remain replayable. Keep preferences,
+   remaining tools, and draws used at session level.
 8. For a score-first session, keep only confirmed action limits such as
    `max_draws` before calibration. Do not copy guessed quality percentages into
    `stop_rules`.
@@ -300,9 +303,11 @@ python3 scripts/blindbox_solver.py <state.json> --format markdown
 ```
 
 该入口自动执行一次道具规划、完整性校验和 Markdown 渲染。原样转交 stdout
-作为完整答复；不得手工摘要、删节概率矩阵、改写推荐动作或在前后另加一份建议。
-只有命令退出码为 0 且输出了标准报告，正式决策才算完成。若命令失败，修正状态后
-重跑；在成功前不提供手工降级建议。标准报告同时给出条件概率口径和必要模型警告。
+作为完整报告，不得手工摘要。用户追问原因或要求简短时，加 `--explain` 生成同源简明解释；
+解释先说预算与风险，再说用卡各结果分支，不把事前策略概率写成事后概率。
+只有命令退出码为 0 且输出了相应报告，正式决策才算完成。若命令失败，核对输入或
+报告程序缺陷；保留真实超限事件与原停止线，不为通过校验而改写历史或放宽上限。
+完整与简明报告都保留条件概率口径及适用的模型假设。
 Score-first guidance reaches this stage only after the selected calibration
 bundle and decision contract are explicitly confirmed.
 
@@ -326,7 +331,13 @@ Assumptions unless the user reports different platform behavior:
 
 - A hint card uniformly reveals one not-yet-shown wrong label for the selected box.
 - A display card reveals the true design, and the box remains available for selection.
-- A box can receive at most one user tool of either type.
+- Keep the exclusion cap and display eligibility separate. Record confirmed
+  `model.tool_rules.max_exclusions` and `display_after_hint` (`true`, `false`,
+  or `null` for unknown), plus actual `boxes[].tools_used`. Without a confirmed
+  stacking rule, use each box at most once provisionally. If the report's
+  `tool_rule_confirmation` says the rule changes the decision, ask that one
+  question before recommending a card. Three exclusions do not by themselves
+  prove that a display card is unavailable.
 
 Keep the hint mechanism in `model.hint_mechanism`. Its default status is
 `assumed`; change it to `confirmed` only after the user or reliable platform
@@ -358,7 +369,9 @@ Then:
 4. For multiple available tools, execute only the rendered first action and
    rerun after its real outcome.
 5. If the platform forces simultaneous use, rank eligible boxes by one-step value of information and avoid spending multiple tools on near-duplicate boxes unless diversification is still optimal.
-6. Never target a box whose `tool_used` is already true.
+6. Follow tool-specific eligibility: a used hint blocks another hint; a
+   display after it requires confirmed permission. Known/opened boxes receive
+   no further cards. Apply the confirmed exclusion cap independently.
 7. If the user explicitly enabled a hidden mixture, block exact hint-card planning when hidden designs cannot appear as hint labels.
 8. Keep `expected_tools_used`, depth-one identity, terminal equivalence, and
    `gain_vs_one_card_horizon` in the planner. Equivalent terminal policies
@@ -388,7 +401,10 @@ When the user reports a hint or display result:
    explicit commitment. For an actual hint, append the excluded design
    and set `tool_used: true`; for a display, set `known` and `tool_used: true`.
 3. Decrement the session-level remaining card count and append the matching
-   actual event. For a switch, append `tray_switch` and update
+   actual event; retain tool types in `tools_used`. If the user reports cards
+   becoming unavailable without a known use, append `tools_updated` with
+   before/after counts and their stated reason, rather than inventing uses.
+   For a switch, append `tray_switch` and update
    `active_tray_id`.
 4. For an opened purchase, set `status: opened`, retain the known design,
    increment session `draws_used`, and append `opened_result`.
@@ -434,6 +450,12 @@ python3 scripts/blindbox_solver.py examples/synthetic-session-review.json \
   --review-session --format markdown
 ```
 
+Real purchases above the original cap are valid history: report the overrun
+and the failed decision-time boundaries without changing the cap. With an
+initial snapshot, replay all recorded later actions and mark only the
+pre-snapshot history unrecoverable. A top-ranked box is not an approved
+purchase if its stop checks fail.
+
 `--review-session` cannot be combined with planning flags, `--screen-tray`,
 `--calibrate-preferences`, `--compare-trays`, or `--brief-preferences`. It
 rewinds the final state, replays every event in order, and reports, per
@@ -472,12 +494,13 @@ At minimum include:
   draws used came from the session envelope.
 - A committed or accepted tray was not bypassed without a recorded release;
   stop-rule changes retained old/new values and the confirmed reason.
-- No box received more than one user tool.
+- Each tool action satisfied the recorded tool-specific rules; unknown rules
+  that change the decision were surfaced before recommending an action.
 - All probabilities came from the current global state.
 - A timed tray was screened by quality lines, not raw clue count; switching
   was not described as guaranteed improvement.
-- Every formal decision command exited 0 and its stdout was relayed unchanged;
-  no partial manual summary replaced the standard report.
+- Every full or concise decision command exited 0; the selected renderer's
+  stdout supplies the numbers and actions.
 - A score-first session used complete scores; any `score_default` was explicitly
   confirmed. Before quality-line confirmation, only the calibration report was
   shown and `stop_rules` was not silently populated.

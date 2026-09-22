@@ -130,7 +130,9 @@ Default mechanism:
 
 - the card selects uniformly from not-yet-shown labels that are not the true design;
 - the result adds one hard exclusion to the selected box;
-- the box cannot receive another user tool.
+- another hint is not planned on that box; a subsequent display depends on
+  confirmed `model.tool_rules.display_after_hint`. The independently configured
+  `max_exclusions` cap limits hints, not display eligibility.
 
 The state records this as
 `model.hint_mechanism = {type: uniform_wrong_label, status: assumed}`.
@@ -155,7 +157,7 @@ Default mechanism:
 - the card reveals the true design;
 - the box remains selectable;
 - the known design globally updates the rest of the tray;
-- the box cannot receive another user tool.
+- the now-known box receives no further tools.
 
 For every possible reveal result, the planner recomputes the full posterior and chooses the best final box under the declared objective. The expected terminal probability is the probability-weighted average over these adaptive branches.
 
@@ -236,7 +238,8 @@ Before presenting results, verify:
 - rescue routes remain eligible when direct draw fails;
 - equivalent terminal policies use fewer expected cards and report depth-two
   action identity separately from terminal equivalence;
-- no user tool is planned on a box with `tool_used: true`.
+- tool-specific eligibility respects recorded use types, the exclusion cap,
+  and confirmed hint-then-display permission.
 - regular-only and assumed hint-mechanism limits appear as stable
   machine-readable warnings, and displayed percentages are called conditional.
 

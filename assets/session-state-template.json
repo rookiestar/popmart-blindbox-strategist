@@ -1,15 +1,23 @@
 {
   "series": "",
-  "model": {
-    "type": "unique_regular",
-    "designs": [],
-    "hint_labels": [],
-    "hint_mechanism": {
-      "type": "uniform_wrong_label",
-      "status": "assumed"
-    }
-  },
-  "boxes": [],
+  "session_schema_version": 1,
+  "active_tray_id": "tray-1",
+  "accepted_tray_id": null,
+  "candidate_tray_id": null,
+  "draws_used": 0,
+  "events": [],
+  "trays": [{
+    "id": "tray-1",
+    "model": {
+      "type": "unique_regular",
+      "designs": [],
+      "hint_labels": [],
+      "hint_mechanism": {"type": "uniform_wrong_label", "status": "assumed"},
+      "tool_rules": {"max_exclusions": null, "display_after_hint": null}
+    },
+    "initial_boxes": [],
+    "boxes": []
+  }],
   "preferences": {
     "strategy": "稳妥避雷",
     "scores": {},

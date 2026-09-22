@@ -91,7 +91,9 @@ class DocsContractTests(unittest.TestCase):
             output = stdout.getvalue()
             if "--format markdown" in command:
                 self.assertTrue(output.startswith("# "), f"{doc}: {command}")
-                if "--review-session" in command:
+                if "--explain" in command:
+                    self.assertIn("条件概率", output, f"{doc}: {command}")
+                elif "--review-session" in command:
                     # Whole-session reviews carry their own report shape.
                     self.assertIn(
                         "## 复盘结论", output, f"{doc}: {command}"

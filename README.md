@@ -173,6 +173,22 @@ python3 scripts/blindbox_solver.py \
 python3 scripts/blindbox_solver.py examples/minimal-demo.json --format markdown
 ```
 
+需要解释选盒或用卡原因时，使用同一计算结果的简明视图：
+
+```bash
+python3 scripts/blindbox_solver.py examples/minimal-demo.json --explain --format markdown
+```
+
+从第一端开始保存会话与事件。将已有盘面转为会话，或在更新后导出包含自动承诺/
+接受事件的完整状态（输出 JSON，不覆盖输入）：
+
+```bash
+python3 scripts/blindbox_solver.py examples/minimal-demo.json --session-state
+```
+
+历史不全时保留初始快照，后续事件仍可复盘。实际购买超过上限会被明确标记，
+不会为生成复盘而改写原上限。排除条数上限与“提示后能否显示”是独立的平台规则。
+
 快速筛端：
 
 ```bash

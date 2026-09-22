@@ -122,6 +122,10 @@ def run_cli(solver: Any, argv: Optional[Sequence[str]] = None) -> int:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("state", help="Path to state JSON, or - for stdin")
+    parser.add_argument("--session-state", action="store_true",
+                        help="Export a canonical single/multi-tray session with its event ledger")
+    parser.add_argument("--explain", action="store_true",
+                        help="Render a concise explanation and conditional tool outcomes")
     parser.add_argument(
         "--plan-one",
         action="store_true",
@@ -230,6 +234,16 @@ def run_cli(solver: Any, argv: Optional[Sequence[str]] = None) -> int:
         if args.beam_width < 0:
             raise StateError("--beam-width must be >= 0")
         session = _normalize_session(_read_json(args.state))
+        if args.session_state:
+            if (args.plan_one or args.plan_depth or args.screen_tray or args.review_session
+                    or args.compare_trays or args.compare_depth or args.calibrate_preferences
+                    or args.brief_preferences or args.explain or args.format != "json"):
+                raise StateError("--session-state is a standalone JSON state export")
+            print(json.dumps(solver.export_session_state(session), ensure_ascii=False, indent=2))
+            return 0
+        if args.explain and (args.format != "markdown" or args.screen_tray or args.review_session
+                            or args.compare_trays or args.calibrate_preferences or args.brief_preferences):
+            raise StateError("--explain requires a decision report with --format markdown")
         if args.plan_one and args.plan_depth not in {None, 1}:
             raise StateError("--plan-one cannot be combined with --plan-depth 2")
         if args.calibrate_preferences and (
@@ -364,10 +378,8 @@ def run_cli(solver: Any, argv: Optional[Sequence[str]] = None) -> int:
                     beam_width=args.beam_width,
                 )
             if args.format == "markdown":
-                markdown = render_user_markdown(
-                    report,
-                    screen_tray=args.screen_tray,
-                )
+                markdown = (solver.render_explanation_markdown(report) if args.explain
+                            else render_user_markdown(report, screen_tray=args.screen_tray))
             else:
                 report = _slim_report(
                     report,
