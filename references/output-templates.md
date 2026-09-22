@@ -61,7 +61,23 @@ append a second recommendation. The renderer itself guarantees:
   `hint_mechanism_assumed` warnings.
 
 Completion means the command exits 0 after report validation. On failure,
-correct the state and rerun; never fall back to a partial manual report.
+check the input or program defect and rerun; preserve real over-limit purchases
+and the original stop rules.
+
+### Concise explanations
+
+For “why this box/card?”, “I don't understand”, or a requested short decision:
+
+```bash
+python3 scripts/blindbox_solver.py <state.json> --explain --format markdown
+```
+
+This view validates the same full calculation and renders its conclusion,
+current risks, confirmed limits and remaining budget. Card actions show an
+outcome/action table and distinguish the pre-card strategy probability
+(including no-purchase branches) from a probability after a real result.
+Unknown tool rules that change the recommendation become one focused question.
+Return this renderer's text; keep the full report available through template B.
 
 ## C. Update after a hint/display/open result
 

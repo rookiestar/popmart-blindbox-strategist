@@ -2,7 +2,13 @@
 
 The solver accepts one JSON object. Preserve this state across turns and mutate it only for confirmed real-world events. The solver ignores optional metadata fields, so they may be used for audit history and counterfactual branches.
 
-## Minimal structure
+## Legacy single-tray structure
+
+This format remains readable. New sessions use the envelope below from the
+first tray. Convert an observed state with
+`python3 scripts/blindbox_solver.py <state.json> --session-state` and save the
+returned JSON. Re-export after updates to persist generated lifecycle events;
+the command never overwrites its input.
 
 ```json
 {
@@ -79,7 +85,7 @@ The solver accepts one JSON object. Preserve this state across turns and mutate 
 
 ## Multi-tray session envelope
 
-Use the session envelope as soon as the user switches trays. Preferences,
+Use the session envelope from the first observed tray. Preferences,
 remaining tools, and the draw cap are session-wide; each tray keeps its own
 model, boxes, clues, known results, and `tool_used` flags.
 
@@ -137,11 +143,12 @@ model, boxes, clues, known results, and `tool_used` flags.
 - `draws_used` must equal the opened-box total across all retained trays.
 - `tools` is the single remaining inventory used by every tray report.
 - `events` is append-only and uses contiguous `seq` values from `1`.
-- Supported events are `tray_switch`, `hint_used`, `display_used`,
+- Supported events are `tray_switch`, `hint_used`, `display_used`, `tools_updated`,
   `opened_result`, `tray_committed`, `tray_accepted`, `tray_released`, and
   `stop_rule_override`; result fields must match the retained state.
-- Tool and opening events must exactly cover the trays' `tool_used` and
-  `opened` boxes; one box may have at most one tool event before opening.
+- Tool and opening events plus each tray's optional `initial_boxes` cover the
+  final used/opened boxes. A second tool is allowed only for confirmed
+  hint-then-display use; repeated hints/displays and cards after opening fail.
 - `accepted_tray_id` is `null` or the currently locked tray. Its acceptance
   lifecycle must match `tray_accepted` / `tray_released`; switching to another
   tray while locked is invalid.
@@ -175,6 +182,29 @@ python3 scripts/blindbox_solver.py \
 
 Legacy single-tray JSON remains valid. It is normalized internally as one
 implicit `tray-1` session while preserving the legacy report shape.
+
+### Initial snapshots and observed limits
+
+Each tray may carry `initial_boxes`: the same box schema describing the first
+observed state, before the recorded events. Keep it fixed when recording later
+actions. Existing exclusions and known results constrain every later posterior;
+previous cards/openings remain unrecoverable rather than invented events.
+Recorded later actions still receive full ex-ante review. Baseline opened boxes
+count toward the global budget. The reversed events must reproduce this snapshot.
+
+An actual opening above `max_draws` is valid history. Preserve the original
+cap and record the opening; review reports `draws_over_budget`, while future
+recommendations remain stopped. Only an explicit user boundary change creates
+a `stop_rule_override`.
+
+If availability changes without a recorded card use, record it separately:
+
+```json
+{"seq": 1, "type": "tools_updated", "tray_id": "tray-a",
+ "before": {"hint_cards": 2, "display_cards": 1},
+ "after": {"hint_cards": 0, "display_cards": 0},
+ "reason": "用户报告本场道具已不可用"}
+```
 
 ### Multi-tray comparison
 
@@ -412,6 +442,22 @@ Every scenario must contain exactly one design per tray position and no duplicat
 `hint_labels` means labels that a hint card can explicitly rule out. A secret design often is not a hint label. Exact hint-card planning is deliberately blocked when a mixture has design sets different from `hint_labels`, because the observation mechanism then requires a richer likelihood model.
 
 ## `boxes`
+
+Keep tool type in `tools_used` (`[]`, `["hint"]`, `["display"]`, or
+`["hint", "display"]`) with `tool_used` equal to whether that list is nonempty.
+Legacy `tool_used: true` without a type remains unknown, not an inferred hint.
+Baseline UI exclusions alone are not evidence of a user tool.
+
+`model.tool_rules` separates independent platform rules:
+
+- `max_exclusions`: confirmed integer cap, or `null`/absent when unknown.
+- `display_after_hint`: `true`, `false`, or `null`/absent when unknown.
+
+A hint is eligible only on an unused, available, unrevealed box below the cap.
+A display ignores the exclusion cap; using it after a hint requires confirmed
+permission and known hint history. When the unknown stacking rule changes the
+recommended action/value, the report supplies `tool_rule_confirmation` instead
+of an unconditional recommendation. Compare both cases without changing the real state.
 
 Every tray position must be represented, including sold positions.
 

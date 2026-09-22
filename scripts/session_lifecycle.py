@@ -203,7 +203,9 @@ def inject_derived_lifecycle_events(
     acceptance_points: Sequence[Mapping[str, Any]],
 ) -> Dict[str, Any]:
     """Insert derived commitments/acceptances and return a contiguous ledger."""
-    auto_by_seq = {int(item["trigger_seq"]): item for item in auto_commitments}
+    existing_commitments = {int(e["seq"]) for e in events if e["type"] == "tray_committed"}
+    auto_by_seq = {int(item["trigger_seq"]): item for item in auto_commitments
+                   if int(item["seq"]) not in existing_commitments}
     acceptance_by_seq = {
         int(item["trigger_seq"]): item for item in acceptance_points
     }
@@ -215,7 +217,7 @@ def inject_derived_lifecycle_events(
         original_seq = int(original["seq"])
         auto = auto_by_seq.get(original_seq)
         commitment: Optional[Dict[str, Any]] = None
-        if auto is not None:
+        if auto is not None and original["type"] != "tray_committed":
             commitment = {
                 "seq": len(canonical) + 1,
                 "type": "tray_committed",
@@ -229,6 +231,10 @@ def inject_derived_lifecycle_events(
         event = copy.deepcopy(dict(original))
         event["seq"] = len(canonical) + 1
         canonical.append(event)
+        if event["type"] == "tray_committed" and event.get("source") == "first_tool_or_open":
+            canonical_auto.append(copy.deepcopy(event))
+        if event["type"] == "tray_accepted" and event.get("source") == "quality_lines_upgrade":
+            canonical_acceptances.append(copy.deepcopy(event))
 
         if commitment is not None:
             commitment["trigger_seq"] = event["seq"]

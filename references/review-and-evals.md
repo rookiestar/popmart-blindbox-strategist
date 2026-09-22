@@ -10,6 +10,12 @@ the numbers by hand.
 
 ## 1. Separate three judgments
 
+An over-limit purchase is a real event to review, not invalid input. Keep the
+original cap, report `draws_over_budget`, and distinguish box ranking from
+permission to purchase. `initial_boxes` marks pre-recording actions unknown;
+it does not prevent replay of later events. The separate `tools_updated` event
+records availability corrections without inventing card uses.
+
 Never collapse these into one verdict.
 
 ### Outcome quality
@@ -177,9 +183,10 @@ A box with lower severity-weighted disliked risk should beat a box with higher l
 
 The same tray may produce a different recommendation under `risk_first`, `target_only`, and `top_target_first`. The response must state that the objective changed.
 
-### E6 — One-tool-per-box
+### E6 — Tool-specific eligibility
 
-No hint or display action may target a box with `tool_used: true`.
+An existing hint blocks another hint; a display after it requires the confirmed
+rule and known use type. The exclusion cap cannot alone block a display.
 
 ### E7 — Counterfactual isolation
 
@@ -275,6 +282,10 @@ continue/stop decisions run `blindbox_solver.py --format markdown` and return
 its validated stdout unchanged. The final reply contains the conclusion,
 three concise explanations, TOP 3 full probability matrix, all stop lines,
 next action, and model scope without a second manual summary.
+
+Requested short explanations use `--explain --format markdown` from the same
+validated report; card branches and strategy-level probabilities remain tied
+to that calculation. Full-report completeness remains unchanged.
 
 Run `tests/test_agent_report_contract.py` with
 `tests/fixtures/agent-report-regressions.json`. Its synthetic short turns cover

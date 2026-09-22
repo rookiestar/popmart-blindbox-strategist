@@ -154,6 +154,7 @@ STRATEGY_ALIASES = {
 
 SESSION_SCHEMA_VERSION = 1
 SESSION_EVENT_TYPES = {
+    "tools_updated",
     "tray_switch",
     "hint_used",
     "display_used",
@@ -354,12 +355,29 @@ def _normalize_state(raw: Mapping[str, Any]) -> Dict[str, Any]:
                 f"use one of {sorted(ALLOWED_STATUSES)}"
             )
         box["tool_used"] = bool(box.get("tool_used", False))
+        if "tools_used" in box:
+            used = box["tools_used"]
+            if (not isinstance(used, list) or len(set(used)) != len(used)
+                    or any(t not in {"hint", "display", "unknown"} for t in used)):
+                raise StateError("box.tools_used must list distinct hint/display/unknown tools")
+            if bool(used) != box["tool_used"]:
+                raise StateError("box.tools_used must agree with tool_used")
         if box["known"] is not None and box["known"] in box["excluded"]:
             raise StateError(f"box {box_id}: known design is also excluded")
         if box["status"] == "opened" and box["known"] is None:
             raise StateError(f"box {box_id}: opened boxes require a known design")
 
     model = state.get("model")
+    if isinstance(model, dict):
+        rules = model.setdefault("tool_rules", {})
+        if not isinstance(rules, dict):
+            raise StateError("model.tool_rules must be an object")
+        cap = rules.get("max_exclusions")
+        if cap is not None and (type(cap) is not int or cap < 0):
+            raise StateError("max_exclusions must be a non-negative integer or null")
+        cross = rules.get("display_after_hint")
+        if cross is not None and type(cross) is not bool:
+            raise StateError("display_after_hint must be true, false or null (unknown)")
     if not isinstance(model, dict):
         raise StateError("state.model must be an object")
     model_type = model.get("type", "unique_regular")
@@ -859,6 +877,16 @@ def _normalize_session_event(
     event["type"] = event_type
     event["tray_id"] = tray_id
 
+    if event_type == "tools_updated":
+        if not str(event.get("reason", "")).strip():
+            raise StateError("tools_updated requires the user's inventory correction reason")
+        for field in ("before", "after"):
+            value = event.get(field)
+            if (not isinstance(value, Mapping) or set(value) != {"hint_cards", "display_cards"}
+                    or any(type(v) is not int or v < 0 for v in value.values())):
+                raise StateError("tools_updated before/after must contain non-negative card counts")
+        return event
+
     if event_type in {"tray_switch", "tray_committed", "tray_accepted"}:
         if "reason" in event:
             event["reason"] = str(event["reason"]).strip()
@@ -1054,6 +1082,37 @@ def _normalize_briefing(raw: Mapping[str, Any]) -> Dict[str, Any]:
     return state
 
 
+def export_session_state(session: Mapping[str, Any]) -> Dict[str, Any]:
+    """Persist the existing canonical ledger, or start at an observed legacy baseline."""
+    if session.get("_briefing_input"):
+        raise StateError("session state export requires an observed tray")
+    active = session["_tray_states"][session["active_tray_id"]]
+    legacy = session.get("_legacy_input", False)
+    out = {
+        "session_schema_version": SESSION_SCHEMA_VERSION,
+        "series": session.get("series", active.get("series")),
+        "active_tray_id": session["active_tray_id"],
+        "accepted_tray_id": None if legacy else session.get("accepted_tray_id"),
+        "candidate_tray_id": None if legacy else session.get("candidate_tray_id"),
+        "draws_used": session["draws_used"],
+        "preferences": copy.deepcopy(active["preferences"]),
+        "tools": copy.deepcopy(session["tools"]),
+        "market_values": copy.deepcopy(active.get("market_values", {})),
+        "events": [] if legacy else copy.deepcopy(session["events"]),
+        "trays": [],
+    }
+    for tid, state in session["_tray_states"].items():
+        tray = {"id": tid, "model": copy.deepcopy(state["model"]),
+                "boxes": copy.deepcopy(state["boxes"])}
+        if legacy:
+            tray["initial_boxes"] = copy.deepcopy(state["boxes"])
+        elif tid in session.get("_initial_boxes", {}):
+            tray["initial_boxes"] = copy.deepcopy(session["_initial_boxes"][tid])
+        tray["participation"] = session.get("_tray_participations", {}).get(tid, "active")
+        out["trays"].append(tray)
+    return out
+
+
 def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
     """Normalize legacy state or a multi-tray session envelope.
 
@@ -1149,6 +1208,7 @@ def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
 
     tray_states: Dict[str, Dict[str, Any]] = {}
     tray_participations: Dict[str, str] = {}
+    initial_boxes: Dict[str, List[Dict[str, Any]]] = {}
     canonical_series = shared.get("series")
     for raw_tray in raw_trays:
         if not isinstance(raw_tray, Mapping):
@@ -1182,9 +1242,17 @@ def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
             raise StateError(
                 f"tray {tray_id}: keep {duplicated_globals} at session level"
             )
+        initial = tray.pop("initial_boxes", None)
         tray_raw = copy.deepcopy(shared)
         tray_raw.update(tray)
         state = _normalize_state(tray_raw)
+        if initial is not None:
+            initial_raw = copy.deepcopy(tray_raw)
+            initial_raw["boxes"] = initial
+            initial_state = _normalize_state(initial_raw)
+            if {b["id"] for b in initial_state["boxes"]} != {b["id"] for b in state["boxes"]}:
+                raise StateError("initial_boxes must cover the same tray positions")
+            initial_boxes[tray_id] = initial_state["boxes"]
         state["_tray_id"] = tray_id
         tray_states[tray_id] = state
         tray_participations[tray_id] = str(participation)
@@ -1249,6 +1317,7 @@ def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
     except LifecycleError as exc:
         raise StateError(str(exc)) from exc
     tool_event_boxes: set[Tuple[str, str]] = set()
+    tool_event_types: Dict[Tuple[str, str], List[str]] = {}
     opened_event_boxes: set[Tuple[str, str]] = set()
     override_chains: Dict[str, List[Dict[str, Any]]] = {}
     for event in events:
@@ -1258,12 +1327,21 @@ def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
         elif event_type in {"hint_used", "display_used", "opened_result"}:
             if event_type in {"hint_used", "display_used"}:
                 key = (event["tray_id"], event["box_id"])
-                if key in tool_event_boxes or key in opened_event_boxes:
+                previous = tool_event_types.get(key, [])
+                initial = next((b for b in initial_boxes.get(key[0], []) if b["id"] == key[1]), None)
+                prior_hint = previous == ["hint_used"] or (
+                    not previous and initial is not None and initial.get("tools_used") == ["hint"])
+                cross_allowed = (
+                    event_type == "display_used" and prior_hint
+                    and tray_states[key[0]]["model"].get("tool_rules", {}).get("display_after_hint") is True)
+                if ((key in tool_event_boxes or (initial is not None and initial["tool_used"]))
+                        and not cross_allowed) or key in opened_event_boxes:
                     raise StateError(
                         "session events must record at most one tool before "
                         f"opening box {key[1]!r} in tray {key[0]!r}"
                     )
                 tool_event_boxes.add(key)
+                tool_event_types.setdefault(key, []).append(event_type)
             else:
                 key = (event["tray_id"], event["box_id"])
                 if key in opened_event_boxes:
@@ -1326,11 +1404,21 @@ def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
         for box in state["boxes"]
         if box["status"] == "opened"
     }
-    if tool_event_boxes != state_tool_boxes:
+    initial_tool_boxes = {
+        (tid, box["id"]) for tid, boxes in initial_boxes.items()
+        for box in boxes if box["tool_used"]
+    }
+    initial_opened_boxes = {
+        (tid, box["id"]) for tid, boxes in initial_boxes.items()
+        for box in boxes if box["status"] == "opened"
+    }
+    if tool_event_boxes | initial_tool_boxes != state_tool_boxes:
         raise StateError(
             "session tool events must exactly match boxes with tool_used=true"
         )
-    if opened_event_boxes != state_opened_boxes:
+    if opened_event_boxes & initial_opened_boxes:
+        raise StateError("an initial opening cannot also be a new opened_result")
+    if opened_event_boxes | initial_opened_boxes != state_opened_boxes:
         raise StateError(
             "session opened_result events must exactly match opened boxes"
         )
@@ -1354,6 +1442,8 @@ def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
         "_legacy_input": False,
         "_tray_states": tray_states,
         "_tray_participations": tray_participations,
+        "_initial_boxes": initial_boxes,
+        "_initial_draws_used": len(initial_opened_boxes),
         "_candidate_source": raw_lifecycle["candidate_source"],
         "_accepted_source": raw_lifecycle["accepted_source"],
         "_accepted_commitment_source": raw_lifecycle[
@@ -1362,6 +1452,10 @@ def _normalize_session(raw: Mapping[str, Any]) -> Dict[str, Any]:
         "_auto_commitments": raw_lifecycle["auto_commitments"],
         "_auto_acceptances": [],
     }
+    rewound = _replay_baseline_trays(provisional)
+    for tid, boxes in initial_boxes.items():
+        if {b["id"]: b for b in rewound[tid]["boxes"]} != {b["id"]: b for b in boxes}:
+            raise StateError("initial_boxes contradict the recorded events and final boxes")
     acceptance_points = _derived_acceptance_points(provisional)
     canonical = inject_derived_lifecycle_events(
         events,
@@ -1989,6 +2083,27 @@ def _action_summary(action: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _tool_eligible(state: Mapping[str, Any], box: Mapping[str, Any], tool: str) -> bool:
+    if box["status"] != AVAILABLE_STATUS or box["known"] is not None:
+        return False
+    rules = state["model"].get("tool_rules", {})
+    if tool == "hint":
+        cap = rules.get("max_exclusions")
+        return not box["tool_used"] and (cap is None or len(box["excluded"]) < cap)
+    if not box["tool_used"]:
+        return True
+    return (rules.get("display_after_hint") is True
+            and box.get("tools_used") == ["hint"])
+
+
+def _record_tool(box: MutableMapping[str, Any], tool: str) -> None:
+    used = list(box.get("tools_used", ["unknown"] if box["tool_used"] else []))
+    if tool not in used:
+        used.append(tool)
+    box["tools_used"] = used
+    box["tool_used"] = True
+
+
 def plan_tools(
     state: Mapping[str, Any],
     posterior: PosteriorResult,
@@ -2073,7 +2188,7 @@ def plan_tools(
     eligible_boxes = [
         b
         for b in state["boxes"]
-        if b["status"] == AVAILABLE_STATUS and not b["tool_used"] and b["known"] is None
+        if b["status"] == AVAILABLE_STATUS and b["known"] is None
     ]
 
     def evaluate_branch(
@@ -2143,6 +2258,8 @@ def plan_tools(
                 "Use a regular-only sensitivity run, or evaluate display cards instead."
             )
         for box in eligible_boxes:
+            if not _tool_eligible(state, box, "hint"):
+                continue
             box_id = box["id"]
             remaining_labels = [d for d in hint_labels if d not in set(box["excluded"])]
             outcome_prob: Dict[str, float] = {d: 0.0 for d in remaining_labels}
@@ -2176,7 +2293,7 @@ def plan_tools(
                 next_box["excluded"] = sorted(
                     set(next_box.get("excluded", [])) | {excluded_label}
                 )
-                next_box["tool_used"] = True
+                _record_tool(next_box, "hint")
                 next_state["tools"]["hint_cards"] = max(
                     0, int(next_state["tools"].get("hint_cards", 0)) - 1
                 )
@@ -2216,6 +2333,8 @@ def plan_tools(
 
     if state["tools"]["display_cards"] > 0:
         for box in eligible_boxes:
+            if not _tool_eligible(state, box, "display"):
+                continue
             box_id = box["id"]
             expected = _expected_metric_template(state)
             draw_probability = 0.0
@@ -2229,7 +2348,7 @@ def plan_tools(
                 next_state = _public_state_copy(state)
                 next_box = next(b for b in next_state["boxes"] if str(b["id"]) == box_id)
                 next_box["known"] = actual
-                next_box["tool_used"] = True
+                _record_tool(next_box, "display")
                 next_state["tools"]["display_cards"] = max(
                     0, int(next_state["tools"].get("display_cards", 0)) - 1
                 )
@@ -2670,6 +2789,14 @@ def _model_reporting_contract(
             }
         )
 
+    if (state["tools"].get("display_cards", 0) > 0
+            and state["model"].get("tool_rules", {}).get("display_after_hint") is None
+            and any(b["tool_used"] and b["known"] is None and b["status"] == AVAILABLE_STATUS
+                    for b in state["boxes"])):
+        warnings.append({"code": "display_after_hint_unknown", "severity": "warning",
+                         "applies_to": "tool_plan",
+                         "message": "提示后能否再用显示卡尚未确认；排除条数上限不能证明显示卡不可用。"})
+
     return (
         {
             "scope": (
@@ -2811,6 +2938,24 @@ def build_report(
         tool_plan = plan_tools(
             state, posterior, depth=plan_depth, beam_width=beam_width
         )
+        if any(w["code"] == "display_after_hint_unknown" for w in model_warnings):
+            alternative = _public_state_copy(state)
+            alternative["model"].setdefault("tool_rules", {})["display_after_hint"] = True
+            for box in alternative["boxes"]:
+                if box["tool_used"] and box["known"] is None:
+                    box["tools_used"] = ["hint"]
+            alternative_plan = plan_tools(_normalize_state(alternative), posterior,
+                                          depth=plan_depth, beam_width=beam_width)
+            original_action = tool_plan["recommended_action"]
+            other_action = alternative_plan["recommended_action"]
+            if not _primary_terminal_values_equivalent(
+                    original_action["expected_terminal_metrics"],
+                    other_action["expected_terminal_metrics"], state):
+                report["tool_rule_confirmation"] = {
+                    "question": "本场用过提示卡的盒子还能用显示卡吗？",
+                    "without_stacking": _action_summary(original_action),
+                    "with_stacking": _action_summary(other_action),
+                }
         if screen_tray:
             report["tray_screening"] = assess_tray(
                 state,
@@ -2833,6 +2978,8 @@ def build_report(
             }
             if warnings:
                 trimmed["warnings"] = warnings
+            if report.get("tool_rule_confirmation"):
+                trimmed["tool_rule_confirmation"] = report["tool_rule_confirmation"]
             return trimmed
         report["next_tool_plan"] = tool_plan
     return report
@@ -3974,6 +4121,7 @@ REVIEW_UNRECOVERABLE_LEGACY = "legacy_state_without_event_ledger"
 SESSION_REVIEW_TOOL_LABELS = {"hint": "提示卡", "display": "显示卡"}
 
 SESSION_REVIEW_EVENT_LABELS = {
+    "tools_updated": "可用卡数量更新",
     "tray_switch": "切端",
     "tray_committed": "候选承诺",
     "tray_accepted": "接受",
@@ -4007,21 +4155,40 @@ def _replay_baseline_trays(
                 if event["excluded"] in box["excluded"]:
                     box["excluded"].remove(event["excluded"])
                 box["tool_used"] = False
+                if "tools_used" in box:
+                    box["tools_used"] = [t for t in box["tools_used"] if t != "hint"]
+                    box["tool_used"] = bool(box["tools_used"])
             elif event_type == "display_used":
                 box = boxes[event["box_id"]]
                 box["known"] = None
                 box["tool_used"] = False
+                if "tools_used" in box:
+                    box["tools_used"] = [t for t in box["tools_used"] if t != "display"]
+                    box["tool_used"] = bool(box["tools_used"])
             elif event_type == "opened_result":
                 box = boxes[event["box_id"]]
-                box["status"] = AVAILABLE_STATUS
-                box["known"] = None
+                initial = next((b for b in session.get("_initial_boxes", {}).get(tray_id, [])
+                                if b["id"] == box["id"]), {})
+                box["status"] = initial.get("status", AVAILABLE_STATUS)
+                box["known"] = initial.get("known")
+        # A pre-session card is part of the observed baseline, not a fabricated event.
+        for initial in session.get("_initial_boxes", {}).get(tray_id, []):
+            boxes[initial["id"]]["tool_used"] = initial["tool_used"]
+            if "tools_used" in initial:
+                boxes[initial["id"]]["tools_used"] = copy.deepcopy(initial["tools_used"])
+            elif not initial["tool_used"]:
+                boxes[initial["id"]].pop("tools_used", None)
     return trays
 
 
 def _replay_baseline_tools(session: Mapping[str, Any]) -> Dict[str, Any]:
     """Remaining inventory plus consumed cards equals the session baseline."""
     tools = copy.deepcopy(session["tools"])
-    for event in session["events"]:
+    for event in reversed(session["events"]):
+        if event["type"] == "tools_updated":
+            if any(tools[k] != v for k, v in event["after"].items()):
+                raise StateError("tools_updated after inventory contradicts subsequent events")
+            tools.update(event["before"])
         if event["type"] == "hint_used":
             tools["hint_cards"] = int(tools.get("hint_cards", 0)) + 1
         elif event["type"] == "display_used":
@@ -4072,7 +4239,7 @@ def _derived_acceptance_points(
     trays = _replay_baseline_trays(session)
     tools = _replay_baseline_tools(session)
     stop_rules = _replay_stop_rules(session)
-    draws_used = 0
+    draws_used = int(session.get("_initial_draws_used", 0))
     candidate_tray_id: Optional[str] = None
     accepted_tray_id: Optional[str] = None
     pending: Optional[Dict[str, Any]] = None
@@ -4082,6 +4249,9 @@ def _derived_acceptance_points(
     for event in session["events"]:
         event_type = event["type"]
         tray_id = event["tray_id"]
+        if event_type == "tools_updated":
+            tools.update(event["after"])
+            continue
         if event_type == "tray_committed":
             candidate_tray_id = tray_id
             accepted_tray_id = None
@@ -4122,14 +4292,14 @@ def _derived_acceptance_points(
         _replay_context(state, stop_rules, tools, draws_used)
         if event_type == "hint_used":
             box["excluded"].append(event["excluded"])
-            box["tool_used"] = True
+            _record_tool(box, "hint")
             tools["hint_cards"] = max(
                 0,
                 int(tools.get("hint_cards", 0)) - 1,
             )
         elif event_type == "display_used":
             box["known"] = event["design"]
-            box["tool_used"] = True
+            _record_tool(box, "display")
             tools["display_cards"] = max(
                 0,
                 int(tools.get("display_cards", 0)) - 1,
@@ -4269,7 +4439,7 @@ def _replay_session(session: Mapping[str, Any]) -> Dict[str, Any]:
     trays = _replay_baseline_trays(session)
     tools = _replay_baseline_tools(session)
     stop_rules = _replay_stop_rules(session)
-    draws_used = 0
+    draws_used = int(session.get("_initial_draws_used", 0))
     openings: List[Dict[str, Any]] = []
     tool_cards: List[Dict[str, Any]] = []
     lifecycle: List[Dict[str, Any]] = []
@@ -4279,6 +4449,10 @@ def _replay_session(session: Mapping[str, Any]) -> Dict[str, Any]:
     for event in session["events"]:
         event_type = event["type"]
         tray_id = event["tray_id"]
+        if event_type == "tools_updated":
+            tools.update(event["after"])
+            lifecycle.append(copy.deepcopy(event))
+            continue
         if event_type in {
             "tray_switch",
             "tray_committed",
@@ -4376,7 +4550,7 @@ def _replay_session(session: Mapping[str, Any]) -> Dict[str, Any]:
                     class_probabilities,
                 )
             )
-            checks = _tray_acceptance_profile(state, chosen_row)
+            checks = _report_stop_rule_checks(state, chosen_row)
             decision = evaluate_draw_decision(state, chosen_row)
             openings.append(
                 {
@@ -4446,7 +4620,7 @@ def _replay_session(session: Mapping[str, Any]) -> Dict[str, Any]:
                 0, int(tools.get("display_cards", 0)) - 1
             )
             real_result = {"revealed": event["design"]}
-        box["tool_used"] = True
+        _record_tool(box, tool)
 
         after_state = trays[tray_id]
         _replay_context(after_state, stop_rules, tools, draws_used)
@@ -4523,9 +4697,14 @@ def _replay_session(session: Mapping[str, Any]) -> Dict[str, Any]:
     return {
         "recoverable": True,
         "unrecoverable_reason": None,
-        "unrecoverable_items": [],
+        "unrecoverable_items": [
+            {"field": f"initial_history:{tid}:{box['id']}",
+             "reason": "已在初始快照中发生，缺少此前逐次记录"}
+            for tid, boxes in session.get("_initial_boxes", {}).items()
+            for box in boxes if box["tool_used"] or box["status"] == "opened"
+        ],
         "baseline": {
-            "draws_used": 0,
+            "draws_used": int(session.get("_initial_draws_used", 0)),
             "tools": _replay_baseline_tools(session),
         },
         "openings": openings,
@@ -4725,6 +4904,9 @@ def build_session_review_report(
                 "max_draws"
             ),
             "opened_boxes": int(session["draws_used"]),
+            "draws_over_budget": max(0, int(session["draws_used"]) - int(
+                active_state["preferences"]["stop_rules"].get("max_draws", session["draws_used"])
+            )),
             "final_stop_conclusion": conclusion,
             "final_stop_conclusion_label": conclusion_label,
         },
@@ -5738,14 +5920,16 @@ def validate_session_review_report(report: Mapping[str, Any]) -> None:
         if not counters.get("final_stop_conclusion_label"):
             errors.append("final stop conclusion lost its label")
         if recoverable:
-            if counters.get("draws_used") != len(openings):
+            if counters.get("draws_used") != len(openings) + int(replay["baseline"].get("draws_used", 0)):
                 errors.append("draw count disagrees with the replay openings")
         draws_used = counters.get("draws_used")
         max_draws = counters.get("max_draws")
         if draws_used is None or int(draws_used) < 0:
             errors.append("draw count is missing")
-        if max_draws is not None and int(max_draws) < int(draws_used):
-            errors.append("draw count exceeds the configured cap")
+        if draws_used is not None:
+            over = max(0, int(draws_used) - int(max_draws if max_draws is not None else draws_used))
+            if counters.get("draws_over_budget") != over:
+                errors.append("budget overrun disagrees with observed draws and original cap")
 
     decision = report.get("decision_quality")
     if not isinstance(decision, Mapping):
@@ -6519,6 +6703,8 @@ def _tool_name(tool: Any) -> str:
 
 
 def _action_sentence(report: Mapping[str, Any]) -> str:
+    if report.get("tool_rule_confirmation"):
+        return "提示后能否显示会改变策略，先确认平台规则，再决定是否用卡。"
     decision = report["draw_decision"]
     plan = report["next_tool_plan"]
     action = plan["recommended_action"]
@@ -6581,6 +6767,8 @@ def _action_sentence(report: Mapping[str, Any]) -> str:
 def _conclusion_and_next_action(
     report: Mapping[str, Any],
 ) -> Tuple[str, str]:
+    if report.get("tool_rule_confirmation"):
+        return "需先确认显示卡规则，再给出用卡建议。", report["tool_rule_confirmation"]["question"]
     action = report["next_tool_plan"]["recommended_action"]
     if action["tool"] in {"hint", "display"}:
         tool = _tool_name(action["tool"])
@@ -7110,6 +7298,14 @@ def render_preference_calibration_markdown(
             ]
         )
 
+    for choice in report["choices"]:
+        favorite = float(choice["actual"]["p_favorite_any_pp"])
+        lines.append(
+            f"方案{choice['choice']}参考盒：最爱 {favorite:.2f}%，"
+            f"也意味着 {100.0 - favorite:.2f}% 不会中最爱；"
+            "风险线达标不等于高把握命中最爱。"
+        )
+
     existing = report["existing_stop_rules"]
     if existing:
         existing_parts: List[str] = []
@@ -7548,7 +7744,7 @@ def _render_review_opening(
     if checks:
         rendered = "；".join(
             f"{check['rule']} {check['actual']:.2f}"
-            f"{'≥' if check['operator'] == '>=' else '≤'}"
+            f"{ {'>=': '≥', '<=': '≤', '<': '<'}[check['operator']] }"
             f"{check['threshold']:.2f}"
             f"（{'过' if check['passed'] else '未过'}）"
             for check in checks
@@ -7556,6 +7752,8 @@ def _render_review_opening(
         lines.append(f"- 当时质量线：{rendered}")
     else:
         lines.append("- 当时质量线：未配置")
+    if not opening["should_draw_at_decision"]:
+        lines.append("- 当时建议停止：" + "；".join(opening["stop_reasons_at_decision"]))
     if opening["chosen_was_optimal"]:
         lines.append("- 所选盒为决策时点最优盒")
     else:
@@ -7654,7 +7852,7 @@ def render_session_review_markdown(report: Mapping[str, Any]) -> str:
             "历史不足，无法逐次判断"
             if not replay["recoverable"]
             else (
-                "全部开盒均为决策时点最优"
+                "所选盒均在当时排名首位（是否允许购买另查停止线）"
                 if decision["all_openings_optimal"]
                 else "有 {} 次非最优开盒（事件 {}）".format(
                     len(decision["non_optimal_openings"]),
@@ -7683,13 +7881,19 @@ def render_session_review_markdown(report: Mapping[str, Any]) -> str:
         f"{'有' if bias['gambler_fallacy_risk'] else '无'}（仅用事前信息判断）",
         f"- 数据可恢复性："
         + (
-            "事件账本完整，整轮确定性回放"
+            ("已记录事件可回放；初始快照之前的历史不完整"
+             if replay["unrecoverable_items"] else "事件账本完整，整轮确定性回放")
             if replay["recoverable"]
             else f"存在不可恢复项（{replay['unrecoverable_reason']}），"
             "未用当前概率编造历史数字"
         ),
     ]
 
+    if counters["draws_over_budget"]:
+        lines.append(f"- 实际超出原抽盒上限 {counters['draws_over_budget']} 盒；原上限未被改写。")
+    if decision["openings_despite_failing_lines"]:
+        lines.append("- 未满足停止线仍购买的事件：" + "、".join(
+            str(seq) for seq in decision["openings_despite_failing_lines"]))
     lines.extend(["", "## 开盒逐次复盘", ""])
     if replay["openings"]:
         for index, opening in enumerate(replay["openings"], start=1):
@@ -7782,7 +7986,7 @@ def render_session_review_markdown(report: Mapping[str, Any]) -> str:
         )
     )
 
-    if not replay["recoverable"]:
+    if replay["unrecoverable_items"]:
         lines.extend(
             [
                 "",
@@ -7797,6 +8001,52 @@ def render_session_review_markdown(report: Mapping[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def render_explanation_markdown(report: Mapping[str, Any]) -> str:
+    """Explain the validated decision, using the same numbers and branch policy."""
+    validate_user_report(report)
+    active, _ = _active_user_report(report)
+    conclusion, next_action = _conclusion_and_next_action(active)
+    lines = ["# 抽盒建议", "", f"**{conclusion}**", ""]
+    if active.get("tool_rule_confirmation"):
+        lines += ["提示卡排除上限与显示卡资格是两条规则；两种规则下的策略不同。",
+                  "", next_action, ""]
+    else:
+        action = active["next_tool_plan"]["recommended_action"]
+        best = active["ranking"][0]
+        lines.append(f"当前候选 {best['box_id']} 号：最爱 {_percent(best['p_favorite_any'])}，"
+                     f"任意喜欢款 {_percent(best['p_like_any'])}，总雷 {_percent(best['p_dislike_any'])}，"
+                     f"硬雷 {_percent(best['p_hard_avoid'])}。")
+        lines += ["", "已确认的边界：" + _calibration_rules_text(active["stop_rules"]) + "。"]
+        lines.append(f"已买 {active['draw_decision']['opened_count']} 盒；"
+                     f"本轮上限 {active['stop_rules'].get('max_draws', '未设')} 盒。")
+        if action["tool"] == "none":
+            if action["action"] == "stop":
+                lines += ["", "停止原因：" + "；".join(active["draw_decision"]["reasons"]) + "。"]
+            else:
+                lines += ["", "该盒满足全部边界。没有其他可用道具方案达到额外收益门槛。"]
+        else:
+            favorite = action["expected_terminal_metrics"]["p_favorite_any"]
+            lines += ["", "用卡只获取信息，不等于购买这盒；根据显示或提示结果再选盒或停止。",
+                      f"按此方案用卡后再选择，最爱命中机会合计 {_percent(favorite)}"
+                      "（已计入不购买分支；这是用卡前的策略概率，不是每种结果出现后的概率）。",
+                      "", "| 可能得到的信息 | 出现概率 | 该分支的后续动作 |",
+                      "|---|---:|---|"]
+            for branch in action["branches"]:
+                continuation = branch.get("next_action_after_outcome")
+                if continuation and continuation["tool"] != "none":
+                    follow = f"再对 {continuation['box_id']} 号用{_tool_name(continuation['tool'])}"
+                else:
+                    chosen = branch["recommended_draw_after_outcome"]
+                    follow = f"买 {chosen} 号" if chosen is not None else "停止，不购买"
+                outcome = str(branch["outcome"])
+                if outcome.startswith("not "):
+                    outcome = "排除 " + outcome[4:]
+                lines.append(f"| {_markdown_cell(outcome)} | {_percent(branch['probability'])} | {follow} |")
+        lines += ["", next_action, ""]
+    lines.extend(_render_model_notes(active))
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def render_user_markdown(
     report: Mapping[str, Any],
     *,
@@ -7807,6 +8057,12 @@ def render_user_markdown(
     active, tray_id = _active_user_report(report)
     lifecycle = _report_lifecycle(report)
     if screen_tray:
+        if active.get("tool_rule_confirmation"):
+            return "\n".join([
+                "# 端筛选", "", "需先确认显示卡规则；两种规则下的策略不同。", "",
+                active["tool_rule_confirmation"]["question"], "",
+                *_render_model_notes(active), "",
+            ])
         return _render_screening_markdown(active, tray_id, lifecycle)
 
     conclusion, next_action = _conclusion_and_next_action(active)
